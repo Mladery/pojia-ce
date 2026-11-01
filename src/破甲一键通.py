@@ -137,6 +137,7 @@ import json
 import time
 import shutil
 import string
+import struct
 import shlex
 import importlib
 import datetime
@@ -2284,6 +2285,289 @@ def _all_task_names(force=False):
 SNAP_PREFIX = "提示词快照-"
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  安装根发现：快捷方式 / 切换工具配置 / 有界目录遍历
+#
+#  为什么加这三层：原来的定位链只认 Program Files、LOCALAPPDATA\Programs 与盘符
+#  根目录下的固定目录名。实际装机大量是「自定义盘符 + 自定义一级目录」——
+#  J:\Workbuddy-GLOBAL\WorkBuddyAI、H:\WorkBuddy、J:\wb\WorkBuddyManager 都属于
+#  这一类，固定候选一个都命中不了，只能靠全盘遍历，而全盘遍历又慢得没人愿意等。
+#
+#  本机上现成的三条线索，比扫盘准、也比扫盘快：
+#    ① 开始菜单 / 桌面快捷方式 —— 系统替我们记着 exe 的绝对路径；
+#    ② wb-switch / cc-switch 的配置 —— 切换工具必须知道每个版本装在哪，
+#       换机、多版本并存的场景下，这里是唯一可靠的真实路径来源；
+#    ③ 有界目录遍历 —— 前两条都没有时，按「盘符 × 深度」找 exe 名，
+#       只 stat 目录、不读文件内容，并带时间预算，比全盘 find 快两个量级。
+# ══════════════════════════════════════════════════════════════════════════════
+
+_WALK_SKIP = {
+    "windows", "$recycle.bin", "system volume information", "recovery",
+    "perflogs", "windows.old", "msocache", "$windows.~bt", "$windows.~ws",
+    "node_modules", ".git", ".svn", "temp", "tmp", "cache",
+}
+
+
+def _lnk_cstr(d, off, uni=False):
+    """读 .lnk 里的一个以 NUL 结尾的字符串。"""
+    if off <= 0 or off >= len(d):
+        return ""
+    if uni:
+        end = off
+        while end + 1 < len(d) and d[end:end + 2] != b"\x00\x00":
+            end += 2
+        return d[off:end].decode("utf-16-le", "ignore")
+    end = d.find(b"\x00", off)
+    if end < 0:
+        return ""
+    return d[off:end].decode("mbcs" if IS_WIN else "utf-8", "ignore")
+
+
+def lnk_target(path):
+    """解析 .lnk 的目标路径。
+
+    纯标准库手写 Shell Link 解析，**不走 COM**：WScript.Shell 这类 COM 实例化在
+    受管环境里会被安全策略直接拦掉（本机实测就是），而 .lnk 的格式是公开且稳定的，
+    自己读反而更可靠、也没有子进程开销。
+    """
+    try:
+        with open(path, "rb") as f:
+            d = f.read()
+    except OSError:
+        return ""
+    if len(d) < 76 or d[:4] != b"L\x00\x00\x00":
+        return ""
+    try:
+        flags = struct.unpack_from("<I", d, 20)[0]
+    except struct.error:
+        return ""
+    p = 76
+    if flags & 0x1:                                   # HasLinkTargetIDList
+        try:
+            p += 2 + struct.unpack_from("<H", d, p)[0]
+        except struct.error:
+            return ""
+    base = suf = ""
+    if (flags & 0x2) and p + 28 <= len(d):            # HasLinkInfo
+        li = p
+        try:
+            size, hdr = struct.unpack_from("<II", d, li)
+            # +12 VolumeID / +16 LocalBasePath / +20 CommonNetworkRelativeLink / +24 CommonPathSuffix
+            lbp_off = struct.unpack_from("<I", d, li + 16)[0]
+            cps_off = struct.unpack_from("<I", d, li + 24)[0]
+            if lbp_off:
+                base = _lnk_cstr(d, li + lbp_off)
+            if cps_off:
+                suf = _lnk_cstr(d, li + cps_off)
+            if hdr >= 0x24:                            # 有 Unicode 变体就用它，中文路径更稳
+                lbpu_off = struct.unpack_from("<I", d, li + 28)[0]
+                cpsu_off = struct.unpack_from("<I", d, li + 32)[0]
+                if lbpu_off:
+                    base = _lnk_cstr(d, li + lbpu_off, uni=True) or base
+                if cpsu_off:
+                    suf = _lnk_cstr(d, li + cpsu_off, uni=True) or suf
+            if size > 0:
+                p = li + size
+        except struct.error:
+            pass
+    # StringData：NAME / RELATIVE_PATH / WORKING_DIR（顺序固定，按 flag 依次出现）
+    workdir = rel = ""
+    for bit, key in ((0x4, "name"), (0x8, "rel"), (0x10, "wd")):
+        if not (flags & bit):
+            continue
+        if p + 2 > len(d):
+            break
+        try:
+            cnt = struct.unpack_from("<H", d, p)[0]
+        except struct.error:
+            break
+        p += 2
+        if flags & 0x80:
+            raw = d[p:p + cnt * 2]
+            p += cnt * 2
+            s = raw.decode("utf-16-le", "ignore")
+        else:
+            raw = d[p:p + cnt]
+            p += cnt
+            s = raw.decode("mbcs" if IS_WIN else "utf-8", "ignore")
+        if key == "wd":
+            workdir = s
+        elif key == "rel":
+            rel = s
+    # ExtraData：环境变量块（0xA0000001）常含未展开的原始目标
+    env_target = ""
+    q = p
+    while q + 8 <= len(d):
+        try:
+            sig, bsz = struct.unpack_from("<II", d, q)
+        except struct.error:
+            break
+        if sig == 0 or bsz < 4 or q + bsz > len(d):
+            break
+        if sig == 0xA0000001 and bsz >= 0x314:
+            uni = d[q + 268:q + 268 + 520]
+            env_target = uni.decode("utf-16-le", "ignore").split("\x00")[0]
+            if not env_target:
+                env_target = d[q + 8:q + 268].split(b"\x00")[0].decode(
+                    "mbcs" if IS_WIN else "utf-8", "ignore")
+        q += bsz
+    for cand in (base + suf, env_target):
+        if cand:
+            t = os.path.expandvars(cand)
+            if os.path.isabs(t):
+                return t
+    if workdir and rel:
+        return os.path.normpath(os.path.join(os.path.expandvars(workdir), rel))
+    return ""
+
+
+def _lnk_candidates():
+    """开始菜单（用户 + 公共）与桌面（用户 + 公共）下的 .lnk 路径。"""
+    out = []
+    for base in (os.environ.get("APPDATA"), os.environ.get("ProgramData")):
+        if not base:
+            continue
+        root = os.path.join(base, "Microsoft", "Windows", "Start Menu", "Programs")
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            if dirpath[len(root):].count(os.sep) >= 3:
+                dirnames[:] = []
+            for fn in filenames:
+                if fn.lower().endswith(".lnk"):
+                    out.append(os.path.join(dirpath, fn))
+    for desk in (os.path.join(os.path.expanduser("~"), "Desktop"),
+                 os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "Desktop")):
+        if not os.path.isdir(desk):
+            continue
+        try:
+            for fn in os.listdir(desk):
+                if fn.lower().endswith(".lnk"):
+                    out.append(os.path.join(desk, fn))
+        except OSError:
+            pass
+    return out
+
+
+def find_install_via_shortcuts(exe_name, judge):
+    """在开始菜单 / 桌面快捷方式里找 exe 名对应的安装根。"""
+    want = exe_name.lower()
+    for lnk in _lnk_candidates():
+        t = lnk_target(lnk)
+        if not t or os.path.basename(t).lower() != want:
+            continue
+        cur = os.path.dirname(t)
+        for _ in range(5):                            # 快捷方式可能指向 bin 子目录，向上找
+            if not cur or not os.path.isdir(cur):
+                break
+            if judge(cur):
+                return cur
+            parent = os.path.dirname(cur)
+            if not parent or parent == cur:
+                break
+            cur = parent
+    return ""
+
+
+def _switch_config_files():
+    """wb-switch / cc-switch 的文本型配置文件（JSON 为主）。"""
+    home = os.path.expanduser("~")
+    appdata = os.environ.get("APPDATA", "")
+    local = os.environ.get("LOCALAPPDATA", "")
+    roots = [os.path.join(home, ".wb-switch"), os.path.join(home, ".cc-switch")]
+    for base in (appdata, local):
+        if base:
+            roots += [os.path.join(base, "com.wbswitch.app"),
+                      os.path.join(base, "com.ccswitch.desktop")]
+    exts = (".json", ".jsonl", ".info", ".conf", ".yaml", ".yml", ".txt")
+    out = []
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            if dirpath[len(root):].count(os.sep) >= 3:
+                dirnames[:] = []
+            for fn in filenames:
+                if not fn.lower().endswith(exts):
+                    continue
+                p = os.path.join(dirpath, fn)
+                try:
+                    if os.path.getsize(p) > 4 * 1024 * 1024:
+                        continue
+                except OSError:
+                    continue
+                out.append(p)
+    return out
+
+
+def find_install_via_switch(exe_name, judge):
+    """从切换工具（wb-switch / cc-switch）的配置里反查 exe 的真实路径。
+
+    这些工具要在多个版本之间切换，配置里必然存着每个版本的绝对路径 ——
+    对「装了国际版 + 国内版、还散落在不同盘」的机器，这比扫盘准得多。
+    """
+    pat = re.compile(r"([A-Za-z]:\\[^\"'<>\r\n]{0,200}?\\)" + re.escape(exe_name), re.I)
+    for f in _switch_config_files():
+        try:
+            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        if exe_name.lower() not in raw.lower():
+            continue
+        txt = raw.replace("\\\\", "\\")               # JSON 里反斜杠是双写的，先归一
+        for m in pat.finditer(txt):
+            cur = m.group(1).rstrip("\\")
+            for _ in range(4):
+                if cur and os.path.isdir(cur) and judge(cur):
+                    return cur
+                parent = os.path.dirname(cur)
+                if not parent or parent == cur:
+                    break
+                cur = parent
+    return ""
+
+
+def find_install_by_walk(exe_name, judge, max_depth=3, budget=8.0, cap=40000):
+    """有界目录遍历：按「深度优先于盘符」的顺序找 exe。
+
+    顺序很关键：如果按盘符外层、深度内层，C 盘会先把时间预算吃光，装在 J 盘
+    深度 2 的目标永远轮不到（本机实测就是这个结果）。改成深度在外层之后，
+    「所有盘符的第 1 层」扫完才进第 2 层，浅层命中永远优先。
+    只 stat 目录、不读文件内容，并带时间与条目数双预算。
+    """
+    t0 = time.time()
+    seen = 0
+    level = [l + ":\\" for l in string.ascii_uppercase if os.path.isdir(l + ":\\")]
+    for _depth in range(max_depth):
+        nxt = []
+        for d in level:
+            if seen >= cap or (time.time() - t0) > budget:
+                return ""
+            try:
+                it = os.scandir(d)
+            except OSError:
+                continue
+            with it:
+                for e in it:
+                    try:
+                        if not e.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    seen += 1
+                    if e.name.lower() in _WALK_SKIP:
+                        continue
+                    try:
+                        if os.path.exists(os.path.join(e.path, exe_name)) and judge(e.path):
+                            return e.path
+                    except OSError:
+                        pass
+                    nxt.append(e.path)
+        level = nxt
+    return ""
+
+
 class WorkBuddyTarget:
     key = "wb"
     label = "WorkBuddy"
@@ -2291,6 +2575,7 @@ class WorkBuddyTarget:
     # v8.15-intl：定位/备份参数下沉为类属性，国际版子类只改这几行即可复用全部逻辑
     install_attr = "wb_install"   # argparse 里手动指定安装目录的参数名
     data_attr = "wb_data"         # 手动指定数据目录的参数名
+    found_by = ""                 # 本次定位命中的来源（给 --status 显示，便于排错）
 
     # ---------------- 安装目录 ----------------
     def pick_title(self):
@@ -2329,6 +2614,13 @@ class WorkBuddyTarget:
         def ok(d):
             return bool(d) and os.path.exists(os.path.join(d, TPL_PROBE))
 
+        def ok_dom(d):
+            # 国际版目录里也有同一份 workbuddy-prompt.tpl。只查模板会把国际版误认成
+            # 国内版，所以「自动发现」这几层统一加一道互斥判据：WorkBuddyAI.exe 在场
+            # 即视为国际版，交给 wbintl 目标处理。
+            return ok(d) and not os.path.exists(os.path.join(d, "WorkBuddyAI.exe"))
+
+        self.found_by = ""
         if explicit:
             good, _note = self.resolve_pick(explicit)
             return good or (explicit if os.path.isdir(explicit) else "")
@@ -2336,14 +2628,29 @@ class WorkBuddyTarget:
         # 0) 用户手动指定过、并且还有效的目录 —— 优先级最高
         manual = get_manual_path(self.key)
         if ok(manual):
+            self.found_by = "手动指定"
             return manual
+
+        # 0.5) 切换工具配置反查：wb-switch / cc-switch 记着每个版本的真实安装路径，
+        #      对「自定义盘符 + 自定义一级目录」的机器，这是最快也最准的一层。
+        hit = find_install_via_switch("WorkBuddy.exe", ok_dom)
+        if hit:
+            self.found_by = "切换工具配置"
+            return hit
 
         # 1) 环境变量 / 常见位置
         la = os.environ.get("LOCALAPPDATA", "")
         if la:
             for n in ("WorkBuddy", "WorkBuddyAI"):
-                if ok(os.path.join(la, "Programs", n)):
+                if ok_dom(os.path.join(la, "Programs", n)):
                     return os.path.join(la, "Programs", n)
+
+        # 1.5) 开始菜单 / 桌面快捷方式：系统替我们记着 exe 的绝对路径，
+        #      用户把快捷方式钉在桌面、或装到非标准盘时，这一层往往一步命中。
+        hit = find_install_via_shortcuts("WorkBuddy.exe", ok_dom)
+        if hit:
+            self.found_by = "快捷方式"
+            return hit
 
         # 2) 进程反查（本机 WorkBuddy 装在 F 盘，靠这步兜住）
         for _pid, _name, cmd in list_processes():
@@ -2351,6 +2658,7 @@ class WorkBuddyTarget:
                 continue
             m = re.search(r'([A-Za-z]:\\[^"]*?WorkBuddy[^"]*?)\\WorkBuddy\.exe', cmd, re.I)
             if m and ok(m.group(1)):
+                self.found_by = "进程反查"
                 return m.group(1)
         # v7.9：这里原本还有一段 `for ... in list_processes(): if name ...: pass`
         # —— 循环体是空的，纯粹白跑一次进程枚举（本机 1.5~4.2s）。已删。
@@ -2369,8 +2677,15 @@ class WorkBuddyTarget:
                           os.path.join(root, "Program Files (x86)", n),
                           os.path.join(root, n)]
         for c in cands:
-            if ok(c):
+            if ok_dom(c):
                 return c
+
+        # 3.5) 有界目录遍历：上面全是「猜目录名」，猜不中就往下走；
+        #      这一层按「盘符 × 深度」实找 WorkBuddy.exe，覆盖自定义一级目录。
+        hit = find_install_by_walk("WorkBuddy.exe", ok_dom)
+        if hit:
+            self.found_by = "目录遍历"
+            return hit
 
         # 4) 注册表
         if IS_WIN:
@@ -2918,7 +3233,8 @@ class WorkBuddyTarget:
         # 于是 `--status` / `--diagnose` 在 WorkBuddy 上一直只报"检测出错"，从没人发现。
         install = self.resolve_install_dir(getattr(args, self.install_attr, "") or "")
         data_dir = self.resolve_data_dir(getattr(args, self.data_attr, "") or "")
-        log("安装目录 : %s" % (install or "(未找到，请手动指定安装目录)"),
+        _src = ("  ← %s" % self.found_by) if (install and getattr(self, "found_by", "")) else ""
+        log("安装目录 : %s%s" % (install or "(未找到，请手动指定安装目录)", _src),
             "g" if install else "red", self.key)
         log("数据目录 : %s%s" % (data_dir, "" if os.path.isdir(data_dir) else "  (不存在)"), "", self.key)
         user, _src = load_user_persona(getattr(args, "persona", "") or "")
@@ -4340,6 +4656,7 @@ class WorkBuddyGlobalTarget(WorkBuddyTarget):
         # 0) 用户手动指定过、并且还有效的目录 —— 优先级最高
         manual = get_manual_path(self.key)
         if ok(manual):
+            self.found_by = "手动指定"
             return manual
 
         # 1) 进程反查（优先）：国际版正在运行时按 WorkBuddyAI.exe 命令行反查安装根。
@@ -4350,7 +4667,15 @@ class WorkBuddyGlobalTarget(WorkBuddyTarget):
                 continue
             m = re.search(r'([A-Za-z]:\\[^"]*?)\\WorkBuddyAI\.exe', cmd, re.I)
             if m and ok(m.group(1)):
+                self.found_by = "进程反查"
                 return m.group(1)
+
+        # 1.5) 切换工具配置反查：wb-switch 同时记着国内版与国际版两条路径，
+        #      进程没在跑的时候，这里是最可靠的一层（本机即由它一步命中 J:\Workbuddy-GLOBAL）。
+        hit = find_install_via_switch("WorkBuddyAI.exe", ok)
+        if hit:
+            self.found_by = "切换工具配置"
+            return hit
 
         # 2) 环境变量 / 常见位置
         la = os.environ.get("LOCALAPPDATA", "")
@@ -4358,6 +4683,12 @@ class WorkBuddyGlobalTarget(WorkBuddyTarget):
             p = os.path.join(la, "Programs", "WorkBuddyAI")
             if ok(p):
                 return p
+
+        # 2.5) 开始菜单 / 桌面快捷方式
+        hit = find_install_via_shortcuts("WorkBuddyAI.exe", ok)
+        if hit:
+            self.found_by = "快捷方式"
+            return hit
 
         # 3) 全盘符扫描（含 Workbuddy-GLOBAL 这类自定义一级目录）
         user = os.environ.get("USERNAME") or os.path.basename(os.path.expanduser("~"))
@@ -4374,6 +4705,12 @@ class WorkBuddyGlobalTarget(WorkBuddyTarget):
         for c in cands:
             if ok(c):
                 return c
+
+        # 3.5) 有界目录遍历：不再依赖目录名猜中，直接按「盘符 × 深度」找 WorkBuddyAI.exe
+        hit = find_install_by_walk("WorkBuddyAI.exe", ok)
+        if hit:
+            self.found_by = "目录遍历"
+            return hit
 
         # 4) 注册表（国际版卸载项 DisplayName / InstallLocation 含 WorkBuddyAI）
         if IS_WIN:

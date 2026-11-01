@@ -61,20 +61,39 @@ python src/破甲一键通.py --revert --target wb
 
 ---
 
-## 五、本仓库新增：`wbintl`
+## 五、本仓库的改动
+
+### 1. 新增目标 `wbintl`（WorkBuddy 国际版）
 
 上游的 `wb` 定位链够不着国际版：进程正则只认 `\WorkBuddy.exe` 结尾、全盘扫描只扫固定几层、`LOCALAPPDATA\Programs\WorkBuddyAI` 不存在时无兜底。
 
-`wbintl` 复用同一套靶点 / 补丁 / 备份逻辑，只改定位：**进程反查优先**（按 `WorkBuddyAI.exe` 命令行反查安装根，比扫盘准）→ `LOCALAPPDATA` → 全盘 → 注册表；安装根判据加验 `WorkBuddyAI.exe` 在场（两版模板同构，单查模板会把国内版目录误收）；数据目录指向 `~/.workbuddy-ai`；备份后缀 `.unlockbak-ai`，与国内版的 `.unlockbak` 互不误认。
+`wbintl` 复用同一套靶点 / 补丁 / 备份逻辑，只改定位：**进程反查优先**（按 `WorkBuddyAI.exe` 命令行反查安装根，比扫盘准）→ 切换工具配置 → `LOCALAPPDATA` → 快捷方式 → 目录遍历 → 注册表；安装根判据加验 `WorkBuddyAI.exe` 在场（两版模板同构，单查模板会把国内版目录误收）；数据目录指向 `~/.workbuddy-ai`；备份后缀 `.unlockbak-ai`，与国内版的 `.unlockbak` 互不误认。
 
 别名 `wbai` / `workbuddy-ai` / `workbuddy-intl`，手动指定用 `--wbintl-install` / `--wbintl-data`。
+
+### 2. 安装根发现增强
+
+原来的定位链只认 `Program Files`、`LOCALAPPDATA\Programs` 和盘符根下几个固定目录名。实际装机大量是「自定义盘符 + 自定义一级目录」—— `J:\Workbuddy-GLOBAL\WorkBuddyAI`、`H:\Workbuddy`、`J:\wb\WorkBuddyManager` 都属于这一类，固定候选一个都命中不了。新增三条线索：
+
+| 来源 | 做法 | 本机实测 |
+|---|---|---|
+| 切换工具配置 | 在 `~/.wb-switch`、`~/.cc-switch` 的 JSON 里反查 exe 绝对路径 | 0.06 s |
+| 开始菜单 / 桌面快捷方式 | 纯标准库解析 `.lnk` 目标 | 0.04 s |
+| 有界目录遍历 | 按「深度优先于盘符」找 exe，8 s / 4 万条双预算 | 0.03–4.9 s |
+
+两个配套细节：
+
+- **互斥判据**：两版目录里都有同一份 `workbuddy-prompt.tpl`，只查模板会把国际版认成国内版。国内版新增「`WorkBuddyAI.exe` 不在场」这一条，自动发现层统一使用它。
+- **来源标注**：`--status` 会显示 `← 切换工具配置` / `← 快捷方式` / `← 进程反查`，定位错了能立刻看出是哪一层判断的。
+
+`.lnk` 解析是自己按 Shell Link 格式读的，不走 `WScript.Shell` —— COM 实例化在受管环境里会被安全策略直接拦掉（本机实测如此），而且每次定位都起一个 COM 对象也不值得。
 
 ---
 
 ## 六、校验
 
 ```
-e9d7954753722165628837248853224d348d3b2feab2a67c4fdde870bb00166f  src/破甲一键通.py           (326,876 B / LF)
+c4f35965114607d87c85550bd203d996593125261dba2a7d2c34107a621ad2fb  src/破甲一键通.py           (341,215 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
 
