@@ -456,7 +456,7 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 - 只影响 Windows；别的平台 `--git-bash` 是空操作。
 - 改的是宿主行为：打开后模型看到的是 `bash` 工具、写的是 bash 语法，跟之前完全不同。所以默认关，且交互里明说。
 - 需要**重启 DSH** 才生效（改的是磁盘配置，运行中的进程不会重读）。
-- 卸载：`--revert` 会按标记摘掉那一段、删掉插件目录；Git 本体不动（`gitbash/` 目录跟着专属目录一起删）。
+- 卸载：`--revert` 按标记摘掉那一段、删掉插件目录，并把**我们下载的**那份 Git Bash 一起删（`gitbash/`）；系统安装的 Git for Windows 一个字节都不碰。
 - 沙箱模式（`workspace-write`）在 Windows 上走的是 `dsh-sandbox-windows-acl`，这套 ACL 是围绕 pwsh 设计的。切到 Git Bash 后如果遇到权限类报错，先切回 `--no-git-bash` 对照一次，再判断是我们的问题还是沙箱的问题。
 
 ### 18. 与上游的差异
@@ -491,7 +491,7 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 ## 六、校验
 
 ```
-ff50f929d401b7dfb87cfc56d9348c58e26dd04e31e2d8e7300b2e411bf9b1b8  src/破甲一键通.py           (474,722 B / LF)
+1c44f646538e23cc2cfb457758c10ef7fe6277753a3b03204690561c33b04931  src/破甲一键通.py           (475,298 B / LF)
 e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```

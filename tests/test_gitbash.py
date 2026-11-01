@@ -237,6 +237,27 @@ def test_install_writes_standard_override_without_preset(core, home, tmp_path):
     assert _read(home) == before
 
 
+def test_revert_removes_downloaded_gitbash(core, home):
+    """--revert 要把我们下的那份 Git Bash 一起删掉 —— 它在专属目录里。
+
+    边界：系统装的 Git for Windows 不归我们管，一个字节都不碰；只有落在
+    managed-prompts/pojia-yijiantong/gitbash/ 里那份（我们下载的）才跟着删。
+    """
+    gb = core.gitbash_dir(str(home))
+    os.makedirs(os.path.join(gb, "bin"))
+    with open(os.path.join(gb, "bin", "bash.exe"), "wb") as f:
+        f.write(b"stub")
+    core.gitbash_install(str(home), EXE)
+    assert os.path.isdir(gb)
+
+    # 顺序与 DSH 的 revert 分支一致：先摘接管段，再清专属目录
+    core.gitbash_remove(str(home))
+    acts = core.revert_traces(str(home), [])
+    assert any(k == "专属目录" for k, _ in acts)
+    assert not os.path.exists(gb), "下载的 Git Bash 应该跟着专属目录一起删"
+    assert not os.path.isdir(core.avatar_dir_for(str(home)))
+
+
 def test_wsl_bash_is_rejected(core):
     """System32 那个 bash.exe 是 WSL 入口，绝不能当成 Git Bash。"""
     assert core._is_wsl_bash(r"C:\Windows\System32\bash.exe")

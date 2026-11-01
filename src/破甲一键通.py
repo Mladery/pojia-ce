@@ -2805,7 +2805,19 @@ def gitbash_remove(dsh_home, dry=False):
             return False, "%s 移除失败：%s" % (tag, e)
     if not done:
         return True, "Git Bash 接管未启用，无需移除"
-    return True, "Git Bash 接管已移除（%s）" % "、".join(done)
+    # 下载的那份 Git Bash 也归我们，一起删；系统装的 Git for Windows 一个字节都不碰。
+    # 放在这里而不是只靠 revert_traces：后者删的是整个专属目录，单跑 remove 时不该留下半个 Git。
+    _gd = gitbash_dir(dsh_home)
+    if _gd and os.path.isdir(_gd):
+        if dry:
+            done.append("将删除下载的 Git Bash")
+        else:
+            shutil.rmtree(_gd, ignore_errors=True)
+            done.append("Git Bash 本体已删")
+    msg = "Git Bash 接管已移除（%s）" % "、".join(done)
+    if not dry:
+        msg += "；系统安装的 Git 不受影响"
+    return True, msg
 
 
 
