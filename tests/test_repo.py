@@ -150,17 +150,37 @@ def test_codesign_private_key_never_committed():
     assert not bad, "工作区里出现了私钥文件：%s" % bad
 
 
-LICENSE_SHA = "cf1e09ddd43b7d9927ee4298f4a87b1d6c0a06b33281612e1d86137055fd4d3c"
+# MIT 的许可正文（"Permission is hereby granted" 到文件末尾）必须逐字不动；
+# 上面那几行版权声明可以追加，正文一个字符都不能改。
+MIT_BODY_SHA = "f9c4c77baa3828004ee54b8a4f2db2e88ed44a6237a493965bf551fac0fcb62d"
 
 
-def test_license_is_upstream_original():
-    """LICENSE 必须逐字节保持上游原文。
+def test_license_keeps_upstream_copyright():
+    """上游的版权行必须还在 —— 这是 MIT 唯一的硬性条件。"""
+    with open(os.path.join(ROOT, "LICENSE"), encoding="utf-8") as f:
+        txt = f.read()
+    assert "MIT License" in txt
+    assert "Copyright (c) 2026 z91772524-ai" in txt
 
-    这是 MIT 唯一的硬性条件（保留版权声明与许可声明），也是 README §八 对外
-    承诺过的事。要改它 —— 比如往后追加我方版权行 —— 先改这里的期望值，并在
-    README 里说明理由，别顺手改了就推。
+
+def test_license_lists_this_repo_copyright():
+    """本仓库新增的部分也署在自己名下：同一份 MIT，两个版权人。"""
+    with open(os.path.join(ROOT, "LICENSE"), encoding="utf-8") as f:
+        txt = f.read()
+    assert "Copyright (c) 2026 Mladery" in txt
+
+
+def test_license_body_is_untouched():
+    """许可正文逐字不动。
+
+    只许往上面追加版权行，不许改正文 —— 改一个字，这份文件就不再是大家认的
+    MIT 了（GitHub 的许可证识别也会从 MIT 掉成「Other」）。真要改，先改这里的
+    期望值并在 README 里说明理由。
     """
-    assert sha256(os.path.join(ROOT, "LICENSE")) == LICENSE_SHA
+    with open(os.path.join(ROOT, "LICENSE"), encoding="utf-8") as f:
+        txt = f.read()
+    body = txt[txt.index("Permission is hereby granted"):]
+    assert hashlib.sha256(body.encode("utf-8")).hexdigest() == MIT_BODY_SHA
 
 
 def test_only_one_mit_license_file():
