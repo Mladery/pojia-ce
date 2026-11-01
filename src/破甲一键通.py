@@ -156,6 +156,22 @@ if sys.stderr is None:
     sys.stderr = sys.stdout
 
 IS_WIN = (os.name == "nt")
+IS_MAC = (sys.platform == "darwin")
+
+# macOS：本轮跑下来被改动过的 .app 包。破甲/还原结束时据此决定要不要 ad-hoc 重签 ——
+# 只有真的往包里写过/删过东西才签。守护任务那种每 5 分钟一次、只动 ~/.workbuddy 的
+# 写入不该触发重签：codesign 要扫几百 MB 的包，慢且没有意义。
+# 详见下方「macOS：.app 是被整体签名的」那一节。
+_MAC_TOUCHED = set()
+
+
+def _mac_touch(path):
+    """记下这个路径所在的 .app（若在包里）。非 macOS 上是空操作。"""
+    if not IS_MAC or not path:
+        return
+    b = app_bundle_of(path)
+    if b:
+        _MAC_TOUCHED.add(b)
 
 
 # ------------------------------------------------- 清掉历史 .pyc（防明文侧漏）
@@ -213,7 +229,7 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess.Popen = _popen_no_window
     subprocess._dsh_no_window_patched = True
 
-VERSION = "8.53"
+VERSION = "8.54"
 # 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
 # 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
 # "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。
@@ -659,6 +675,8 @@ def _atomic_write(path, data):
 def write_text(path, text, bom=False, make_dirs=False):
     if DRY_RUN:
         return False
+    # macOS：往 .app 里写任何东西都会让整体签名失效，记下来，收尾时统一重签。
+    _mac_touch(path)
     if make_dirs:
         d = os.path.dirname(path)
         if d and not os.path.isdir(d):
@@ -1179,8 +1197,200 @@ def is_admin():
         return False
 
 
-# ---- 手动指定安装目录（系统目录选择窗口） --------------------------------
+# ══════════════════════════════════════════════════════════════════════════════
+#  macOS：.app 是被整体签名的，改里面的文件就会让签名失效
+# ══════════════════════════════════════════════════════════════════════════════
+#  为什么单独一段：macOS 上这些客户端都是 .app 包，而 .app 的签名 seal 覆盖**整个
+#  包内文件树** —— 破甲往里新增的东西（asar 解包出的 Contents/Resources/app/、
+#  managed-prompts/、一堆 .bak 备份）会让 seal 立刻不匹配。
+#
+#  后果分两种，别混为一谈：
+#    · 带 com.apple.quarantine 的包（刚下载、一次都没启动过）再启动时 Gatekeeper 会
+#      重新评估整个 bundle → 直接报「已损坏，无法打开」。这是用户最容易撞上的。
+#    · 已经启动过一次的（quarantine 已被清掉）不会再走那次评估，通常照常能开。
+#
+#  这里只做「查」和「按需重签」，**不自动重签**：重签会顶掉厂商的 Developer ID，
+#  之后应用自更新会检测到签名变化，属于必须让用户知情的操作，所以只由 --resign 触发。
+#
+#  另：app.asar 本体全程不动（解包走 resources/app/ 目录优先于 app.asar 的加载规则），
+#  正好躲开 Electron 30+ 的 EnableEmbeddedAsarIntegrityValidation。那条路一旦改成
+#  重打包 asar，macOS 上会 100% 起不来 —— 别改。
 
+
+def app_bundle_of(path):
+    """路径若落在某个 .app 包内，返回那个 .app 的绝对路径；否则返回 ""。"""
+    if not path:
+        return ""
+    parts = os.path.abspath(path).split(os.sep)
+    for i, seg in enumerate(parts):
+        if seg.endswith(".app"):
+            return os.sep.join(parts[:i + 1]) or os.sep
+    return ""
+
+
+def _run_quiet(cmd, timeout):
+    """跑一条命令拿 (returncode, 合并输出)。起不来就返回 (None, 原因)。"""
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, str(e)
+    return r.returncode, (r.stdout or b"").decode("utf-8", "replace").strip()
+
+
+def codesign_verify(app_path, timeout=120):
+    """查 .app 的签名还完整吗。返回 (ok, 说明)。
+
+    只读。非 macOS、或机器上没有 codesign 时一律当 ok —— 宁可漏报，也不要在别的
+    平台上凭空报一个「签名坏了」。
+    """
+    if not IS_MAC or not app_path:
+        return True, "跳过（非 macOS）"
+    rc, out = _run_quiet(["codesign", "--verify", "--strict", "--deep", app_path], timeout)
+    if rc is None:
+        return True, "跳过（codesign 不可用：%s）" % out
+    return (rc == 0), (out or "签名完整")
+
+
+def codesign_adhoc(app_path, timeout=300):
+    """ad-hoc 重签：`codesign --force --deep --sign -`。
+
+    身份写 `-` = 不依赖任何证书，本机自签。改过内容的 .app 用这个能重新变成「签名
+    有效」，代价是丢掉厂商的 Developer ID —— 之后系统当成未识别开发者的包，首次
+    打开要右键 → 打开。
+    """
+    if not IS_MAC or not app_path:
+        return False, "跳过（非 macOS）"
+    rc, out = _run_quiet(["codesign", "--force", "--deep", "--sign", "-", app_path], timeout)
+    if rc is None:
+        return False, "codesign 不可用：%s" % out
+    return (rc == 0), (out or "已 ad-hoc 重签")
+
+
+# 认得出来的客户端包名片段。只用来在 /Applications 里挑候选，不做匹配判断 ——
+# 真正是不是靶点由 --status 决定，这里只回答「这些包的签名还好吗」。
+MAC_APP_HINTS = ("DeepSeek Harness", "DSH Desktop", "WorkBuddy", "Cursor", "Trae",
+                 "Windsurf", "Kiro", "CodeBuddy", "ZCode", "iFlow", "Claude", "Codex")
+
+
+def mac_app_candidates(dirs=None):
+    """扫 /Applications 和 ~/Applications，挑名字对得上已知客户端的 .app。"""
+    if dirs is None:
+        home = os.path.expanduser("~")
+        dirs = ["/Applications", os.path.join(home, "Applications")]
+    out, seen = [], set()
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".app"):
+                continue
+            stem = name[:-4].lower()
+            if not any(h.lower() in stem for h in MAC_APP_HINTS):
+                continue
+            p = os.path.join(d, name)
+            if p in seen:
+                continue
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def mac_resign_touched():
+    """把本轮改动过的 .app 重新做 ad-hoc 签名。只在 macOS 且真动过包内文件时生效。
+
+    为什么必须签：.app 的签名 seal 覆盖整个包内文件树。破甲往里写了东西（asar 解包
+    出的 resources/app/、managed-prompts/、.bak 备份），或者还原把东西删了，seal 就
+    再也不匹配。带 com.apple.quarantine 的包（刚下载、一次都没启动过）再启动时
+    Gatekeeper 会重评整个 bundle，直接报「已损坏，无法打开」—— 社群反馈里「破甲完
+    打不开」就是这一条。
+
+    ad-hoc 重签（身份写 `-`）能把它变回「签名有效」的状态，代价是厂商的 Developer ID
+    变成自签名，首次打开要右键 → 打开。比打不开强，而且包本来就已经被改过了。
+    """
+    if not IS_MAC or not _MAC_TOUCHED:
+        return
+    for app in sorted(_MAC_TOUCHED):
+        ok, note = codesign_adhoc(app)
+        if ok:
+            log("已重签 %s（ad-hoc）—— 改过包内文件，不重签会被 Gatekeeper 判成已损坏" % app, "g")
+        else:
+            log("[!] %s 重签失败：%s" % (app, note), "y")
+            log("    手动补一次：codesign --force --deep --sign - \"%s\"" % app, "dg")
+            log("    还打不开再补：xattr -cr \"%s\"" % app, "dg")
+    _MAC_TOUCHED.clear()
+
+
+def run_mac_check(args, paths=None):
+    """macOS 签名体检：这些 .app 还签着吗，破甲之后会不会打不开。
+
+    只读；要修得显式加 --resign（ad-hoc 重签，会顶掉厂商签名）。
+    """
+    header("macOS 签名体检", "只读：不修、不重签；加 --resign 才动手")
+    if not IS_MAC:
+        say("  这个命令只在 macOS 上有意义 —— 当前不是 macOS，跳过。", "y")
+        return 0
+
+    apps = [p for p in (paths or []) if p]
+    if not apps:
+        apps = mac_app_candidates()
+    if not apps:
+        say("  /Applications 和 ~/Applications 里没找到认得的客户端包。", "y")
+        say("  装到别处的话直接指路径：--mac-check \"/Volumes/Xxx/DSH Desktop.app\"", "dg")
+        return 0
+
+    bad = []
+    for a in apps:
+        ok, note = codesign_verify(a)
+        if ok:
+            say("  [OK]   %s" % a, "g")
+        else:
+            bad.append(a)
+            say("  [坏]   %s" % a, "red")
+            for line in note.splitlines()[:3]:
+                say("         %s" % line, "dg")
+
+    say("")
+    if not bad:
+        say("  全部签名完整，破甲之后也可以放心启动。", "g")
+        return 0
+
+    say("  有 %d 个包的签名已经失效。" % len(bad), "y")
+    say("  这通常意味着破甲往 .app 里写过东西（asar 解包目录 / managed-prompts / .bak）。", "dg")
+    say("  能正常启动就不用管；报「已损坏，无法打开」时按下面两条来：", "dg")
+    say("", "dg")
+    for a in bad:
+        say("    codesign --force --deep --sign - \"%s\"" % a, "c")
+        say("    xattr -cr \"%s\"" % a, "c")
+    say("", "dg")
+    say("  第一条是 ad-hoc 重签（让签名重新有效）；第二条清掉隔离标记。", "dg")
+    say("  重签之后厂商签名变成「未识别开发者」，首次打开要右键 → 打开。", "dg")
+
+    if getattr(args, "resign", False):
+        say("")
+        say("  按 --resign 要求，开始 ad-hoc 重签…", "c")
+        fail = 0
+        for a in bad:
+            ok, note = codesign_adhoc(a)
+            if ok:
+                say("  [重签] %s" % a, "g")
+            else:
+                fail += 1
+                say("  [失败] %s —— %s" % (a, note), "red")
+        if fail:
+            say("  有 %d 个没签成，上面是 codesign 的原始输出。" % fail, "y")
+            return 1
+        say("  全部重签完成。重启应用前建议先跑一次 --status 确认补丁还在。", "g")
+    else:
+        say("  想让我直接签，加 --resign 重跑这条命令。", "dg")
+    return 0
+
+
+# ---- 手动指定安装目录（系统目录选择窗口） --------------------------------
 def load_manual_paths():
     try:
         return json.loads(read_text(MANUAL_PATH_FILE)[0])
@@ -2846,6 +3056,10 @@ def revert_traces(dsh_home, bases, dry=False, deep=False):
         if _rk in _seen_root:
             continue                    # 两套 base 常指到同一个安装根，别重复列/重复删
         _seen_root.add(_rk)
+        # macOS：还原是**删**包内文件，同样让签名失效 —— 和写入一样要记下来重签。
+        # 预演不记：dry=True 一个字节都没动，不该在收尾时去签一遍。
+        if not dry:
+            _mac_touch(root)
         res = os.path.join(root, "resources")
         app = os.path.join(res, "app")
         asar = os.path.join(res, "app.asar")
@@ -3173,6 +3387,7 @@ class DshTarget:
         """
         if not os.path.isdir(path):
             return True
+        _mac_touch(path)
         shutil.rmtree(path, ignore_errors=True)
         if not os.path.isdir(path):
             return True
@@ -9253,6 +9468,9 @@ def run_action(args, mode, targets=None):
         except Exception as e:
             ERRORS += 1
             log("执行出错：%s" % e, "red", k)
+    # macOS：本轮写/删过 .app 里的文件就必须重签，否则 Gatekeeper 会判「已损坏」。
+    # 没动过包内文件时这里是空操作（_MAC_TOUCHED 为空），不白花几秒去签一个大包。
+    mac_resign_touched()
     say("")
     if ERRORS:
         say(RED("  本次有 %d 项没做成（退出码 1）。" % ERRORS))
@@ -9715,6 +9933,13 @@ def build_parser():
     p.add_argument("--no-git-bash", dest="git_bash", action="store_false",
                    help="不改 Git Bash 接管（默认；交互时也不再问）")
     p.add_argument("--zcode-dir", help="手动指定 ZCode 配置目录（一般是 用户目录\\.zcode）")
+    p.add_argument("--mac-check", dest="mac_check", nargs="?", const="", metavar="APP",
+                   help="macOS：检查这些 .app 的代码签名还完整吗（不传路径就扫 /Applications "
+                        "和 ~/Applications）。破甲往 .app 里写过文件后签名会失效，带隔离标记的"
+                        "包再启动会报「已损坏，无法打开」")
+    p.add_argument("--resign", action="store_true",
+                   help="配合 --mac-check：对签名失效的包做 ad-hoc 重签"
+                        "（codesign --force --deep --sign -，会顶掉厂商签名）")
     p.add_argument("--zcode-cjs", help="手动指定 ZCode 的 resources\\glm\\zcode.cjs（自定义安装路径时用）")
     p.add_argument("--zpatch", action="store_true",
                    help="额外替换 ZCode 打包文件里的系统提示词（resources\\glm\\zcode.cjs；"
@@ -9856,6 +10081,12 @@ def main():
         return
     if args.compare:
         WorkBuddyTarget().do_compare()
+        return
+    if args.mac_check is not None:
+        # macOS 签名体检。nargs="?"：不带值扫 /Applications，带值就查指定路径。
+        # 这条是纯只读，除非再给 --resign。
+        _p = (args.mac_check or "").strip()
+        run_mac_check(args, [_p] if _p else None)
         return
     if args.guard:
         t = WorkBuddyTarget()

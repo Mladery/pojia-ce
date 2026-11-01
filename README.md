@@ -3,7 +3,7 @@
 [![CI](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml)
 [![Build](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml)
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.53-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.54-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。
 > MIT 协议，**非官方**，与原作者无隶属关系；本项目按自己的节奏演进，不跟随上游成品。
 
@@ -59,11 +59,35 @@ python src/破甲一键通.py --apply --target dsh --dsh-mode preset   # DSH 破
 python src/破甲一键通.py --apply --target dsh --git-bash          # Windows：默认命令工具换成 Git Bash（默认关）
 python src/破甲一键通.py --clean-spill --target wb   # 清过期的会话快照
 python src/破甲一键通.py --revert --target wb
+python src/破甲一键通.py --mac-check         # macOS：查 .app 签名还完整吗（只读）
+python src/破甲一键通.py --mac-check --resign # macOS：把签名失效的包 ad-hoc 重签
 pojia-ce.exe                                 # 打包版：双击/直接跑就开图形界面
 pojia-ce.exe --menu                          # 打包版：走命令行交互菜单
 ```
 
 所有原始开关（`--apply` / `--revert` / `--persona` / `--guard` / `--snapshot` / `--pick`）都保留。先 `--dry-run`，再动手。
+
+### macOS 用户先看这一段
+
+macOS 上的客户端都是 `.app` 包，而 `.app` 是**整体签名**的 —— 破甲往里写文件（asar 解包目录、`managed-prompts/`、`.bak` 备份）会让签名失效。带隔离标记的包（刚下载、一次都没启动过）再启动时 Gatekeeper 会报「已损坏，无法打开」；已经启动过一次的通常没事。
+
+所以 v8.54 起，**改完包内文件会自动 ad-hoc 重签**（`codesign --force --deep --sign -`，只在真动过 `.app` 时才跑）。重签后厂商签名变成自签名，首次打开要右键 → 打开。
+
+已经卡住打不开的，跑：
+
+```bash
+pojia-ce --mac-check            # 看哪些包的签名坏了（只读）
+pojia-ce --mac-check --resign   # 顺手签回去
+```
+
+两条手动救援命令，macOS 自带：
+
+```bash
+codesign --force --deep --sign - /Applications/Xxx.app
+xattr -cr /Applications/Xxx.app
+```
+
+还有两点 macOS 专属：客户端要**连托盘一起退干净**再重开（`Cmd+Q` 不够），以及 `/Applications` 里的包要求属主是你自己 —— 装到别处或 `~/Applications` 更省事。
 
 ### 免安装：直接下可执行文件
 
@@ -109,6 +133,7 @@ pojia-ce.exe --menu                          # 打包版：走命令行交互菜
 
 | 版本 | 主题 |
 |---|---|
+| [`v8.54-CE`](CHANGELOG.md#v854-ce-2026-11-02) | macOS：改完 .app 自动 ad-hoc 重签 / `--mac-check` 体检 |
 | [`v8.53-CE`](CHANGELOG.md#v853-ce-2026-11-01) | 界面重做（面向普通用户） / DSH 破甲方式可选 / Git Bash 开关进界面 |
 | [`v8.52-CE`](CHANGELOG.md#v852-ce-2026-11-01) | 打包版带 GUI / Cython 预编译 / 构建收进 `tools/` / 许可归属 |
 | [`v8.51-CE`](CHANGELOG.md#v851-ce-2026-11-01) | Git Bash 接管 / DSH 破甲模式 / 运行时守卫 / 还原彻底化 |
@@ -163,7 +188,7 @@ pojia-ce.exe --menu                          # 打包版：走命令行交互菜
 ## 六、校验
 
 ```
-07f6134a33bfe87c489c23f4ec01ebbc4f9f53b0cd5e5129fd8b4d27aec7202a  src/破甲一键通.py           (477,621 B / LF)
+5c3eac449bcbff8be9c9236e6c4a05fb37526d07a1f6aec96acc7fa2baa94be4  src/破甲一键通.py           (488,823 B / LF)
 4ff11a57d9d349d47b78e3237b276fa0b763bbd1ad547d15f119892e906fe62c  src/破甲GUI.py              (46,610 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
@@ -175,9 +200,9 @@ git clone https://github.com/z91772524-ai/pojia-next && cd pojia-next
 git show 536ece2:破甲一键通.py | sha256sum
 ```
 
-`src/破甲一键通.py` 现在比 `upstream/` 大 126,228 B —— §四 的「只删不加」说的是摘封条那一步（净减）；多出来的字节来自 v8.2 之后的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、破甲模式、守卫、Git Bash 接管、打包适配），逐条见 [CHANGELOG](CHANGELOG.md)。
+`src/破甲一键通.py` 现在比 `upstream/` 大 137,430 B —— §四 的「只删不加」说的是摘封条那一步（净减）；多出来的字节来自 v8.2 之后的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、破甲模式、守卫、Git Bash 接管、打包适配、macOS 签名重签），逐条见 [CHANGELOG](CHANGELOG.md)。
 
-版本号分两段存：`VERSION = "8.53"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.53-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
+版本号分两段存：`VERSION = "8.54"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.54-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
 ### 产物校验（两条独立通道）
 

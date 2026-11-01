@@ -2,10 +2,11 @@
 
 破甲一键通 · 社区版（`pojia-ce`）的逐版改动。**README 只留工具说明与索引，实现细节、踩过的坑、验证方式都在这里。**
 
-版本号分两段：`VERSION`（机器值，写进护照和标记块）+ `EDITION`（只拼到对外显示上，`VER_TAG = "8.53-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。带 tag 的版本在 [Releases](https://github.com/Mladery/pojia-ce/releases) 里，发布说明在 [docs/release-notes/](docs/release-notes/)。
+版本号分两段：`VERSION`（机器值，写进护照和标记块）+ `EDITION`（只拼到对外显示上，`VER_TAG = "8.54-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。带 tag 的版本在 [Releases](https://github.com/Mladery/pojia-ce/releases) 里，发布说明在 [docs/release-notes/](docs/release-notes/)。
 
 | 版本 | 日期 | 主题 |
 |---|---|---|
+| [`v8.54-CE`](#v854-ce-2026-11-02) | 2026-11-02 | macOS：改完 .app 自动 ad-hoc 重签 / `--mac-check` 体检 |
 | [`v8.53-CE`](#v853-ce-2026-11-01) | 2026-11-01 | 界面重做（面向普通用户） / DSH 破甲方式可选 / Git Bash 开关进界面 |
 | [`v8.52-CE`](#v852-ce-2026-11-01) | 2026-11-01 | 打包版带 GUI / Cython 预编译 / 构建收进 `tools/` / 许可归属 |
 | [`v8.51-CE`](#v851-ce-2026-11-01) | 2026-11-01 | Git Bash 接管 / DSH 破甲模式 / 运行时守卫 / 还原彻底化 |
@@ -14,6 +15,79 @@
 | [`v8.3-CE`](#v83-ce-2026-11-01) | 2026-11-01 | 写后自检 / 长路径 / 镜像层 / Electron 保险丝 / Trae 双发行版 |
 | [`v8.2-CE`](#v82-ce-2026-11-01) | 2026-11-01 | `wbintl` / 四源安装根发现 / 快照体检 / 图形界面 / DSH 0.2.1-rc.5 适配 |
 | [`v8.0-CE`](#v80-ce-2026-10-29) | 2026-10-29 | 起点：摘掉加密封条，转社区独立维护 |
+
+---
+
+## v8.54-CE (2026-11-02)
+
+macOS 上「破甲完打不开」的那条硬伤。不是权限问题，是**代码签名**。
+
+### 问题：.app 是被整体签名的
+
+macOS 上这些客户端都是 `.app` 包，而 `.app` 的签名 seal 覆盖**整个包内文件树**。破甲往里写东西 —— asar 解包出的 `Contents/Resources/app/`、`managed-prompts/`、一堆 `.bak` 备份 —— seal 立刻不匹配。
+
+后果分两种，别混为一谈：
+
+| 包的状态 | 再启动会怎样 |
+|---|---|
+| 带 `com.apple.quarantine`（刚下载、一次都没启动过） | Gatekeeper 重评整个 bundle → 直接报**「已损坏，无法打开」** |
+| 已经启动过一次（quarantine 已被清掉） | 不再走那次评估，通常照常能开 |
+
+也就是说：**同一份产物，先启动过再破甲就没事，先破甲再启动就炸** —— 这种「看顺序」的 bug 最难被用户说清楚，也最容易被误判成「这工具把软件搞坏了」。
+
+### 修法：写完盘自动 ad-hoc 重签
+
+对齐上游 macOS 版（[`z91772524-ai/pojia-next-mac`](https://github.com/z91772524-ai/pojia-next-mac) v1.0.9）的做法 —— 他们先撞上这个坑，v1.0.7/1.0.8 都没有重签，v1.0.9 补上并写进更新日志。这里照搬：
+
+```
+codesign --force --deep --sign - /Applications/Xxx.app
+```
+
+身份写 `-` = ad-hoc，不依赖任何证书，本机自签。改过的包用它重新变成「签名有效」，代价是厂商的 Developer ID 变成自签名，之后首次打开要右键 → 打开。比打不开强，而且包本来就已经被改过了。
+
+**只在真动过包内文件时才签。** 这一点是性能上的关键，也是上游特别标注的：守护任务每 5 分钟写一次 `~/.workbuddy/`，那在包**外面**；要是每次触发重签，就是每 5 分钟扫几百 MB 的包。
+
+实现上不做「猜测哪个目标在包里」，而是**在写入和删除的收口处记账**：
+
+- `write_text()` —— 全项目唯一的文本写入入口，落笔前 `_mac_touch(path)`；
+- `_asar_drop()` —— 解包/还原时删 `resources/app/` 的地方；
+- `revert_traces()` —— 还原是按安装根删文件，那里直接 `_mac_touch(root)`，且 `dry=True` 时**不记**（预演一个字节都没动，不该在收尾时去签一遍）。
+
+`_mac_touch()` 用 `app_bundle_of()` 判断路径是否落在 `.app` 内，记进模块级 `_MAC_TOUCHED`；`run_action()` 收尾调一次 `mac_resign_touched()`，签完清空（同一进程里菜单连跑两次不会重复签）。
+
+签失败不吞：把 `codesign` 的原始输出打出来，再给两条能救回来的命令（`codesign --force --deep --sign -` / `xattr -cr`）。
+
+### 新增 `--mac-check`
+
+已经卡住打不开的人，需要一个**只读**的入口先看清状况：
+
+```bash
+pojia-ce --mac-check                    # 扫 /Applications 和 ~/Applications
+pojia-ce --mac-check "/Volumes/X/DSH Desktop.app"
+pojia-ce --mac-check --resign           # 顺手把坏的签回去
+```
+
+默认不传路径就按 `MAC_APP_HINTS`（DSH Desktop / WorkBuddy / Cursor / Trae / Windsurf / Kiro / CodeBuddy / ZCode / iFlow / Claude / Codex）在 `/Applications`、`~/Applications` 里挑候选，逐个跑 `codesign --verify --strict --deep`。只认得的包才进候选 —— 绝不能把 Safari 也重签一遍。
+
+非 macOS 上这条命令只打印一句「只在 macOS 上有意义」就退出，`codesign_verify` 也直接返回 `(True, "跳过（非 macOS）")`。**宁可漏报，也不要在别的平台上凭空报一个「签名坏了」。**
+
+### 一条不能碰的红线：app.asar 本体
+
+破甲解包 asar 走的是「`resources/app/` 目录优先于 `app.asar`」这条 Electron 加载规则，**`app.asar` 本体全程不动**。
+
+这不是巧合，是必须守住的东西：Electron 30+ 在 macOS 上默认开启 `EnableEmbeddedAsarIntegrityValidation`，`app.asar` 的哈希写在 `Info.plist` 的 `ElectronAsarIntegrity` 里。一旦改成「重打包 asar」的路线，哈希对不上，应用**直接崩溃退出**，比签名失效还严重 —— 签名失效至少还能右键打开。
+
+已写进代码注释：`别改`。
+
+### 测试
+
+新增 `tests/test_macos.py` 15 项，钉的是会咬人的线而不是覆盖率：
+
+- `app_bundle_of` 认不认得出包（含 `.appdata` / `notes.app.txt` 这种只含子串的假阳性）；
+- 非 macOS 上一个字节都不许动、不许凭空报警；
+- 预演不记账；
+- 什么都没动时一次 `codesign` 都不许跑；
+- 签失败必须把两条手动命令打出来。
 
 ---
 
