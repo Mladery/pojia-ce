@@ -36,6 +36,13 @@ jobs:
           - { os: macos-13,       py: "3.11", asset: macos-x64,   ext: ""     }
           - { os: macos-latest,   py: "3.11", asset: macos-arm64, ext: ""     }
 
+    env:
+      # Windows runner 的控制台编码是 cp1252/cp936。冒烟步骤要打印产物的
+      # --version 输出（含中文），不强制 UTF-8 会直接 UnicodeEncodeError ——
+      # 第一次跑就栽在这儿，产物本身是好的，是打印炸了。
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -67,21 +74,31 @@ jobs:
         shell: python
         run: |
           import glob, os, subprocess, sys
-          cands = [p for p in glob.glob("build/dist/*") if os.path.isfile(p)]
-          assert len(cands) == 1, cands
+          # 再兜一层：即便 env 没生效，也别让"打印中文"把这一步搞挂。
+          try:
+              sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          except Exception:
+              pass
+
+          cands = [p for p in glob.glob(os.path.join("build", "dist", "*"))
+                   if os.path.isfile(p)]
+          assert len(cands) == 1, "expected exactly one binary, got %r" % (cands,)
           exe = cands[0]
           if os.name != "nt":
               os.chmod(exe, 0o755)
-          r = subprocess.run([exe, "--version"], capture_output=True,
-                             text=True, encoding="utf-8", errors="replace", timeout=120)
-          print("stdout:", r.stdout.strip())
-          assert r.returncode == 0, r.stderr
-          assert "CE" in r.stdout, r.stdout
+
+          r = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=180)
+          print("--version exit=%s stdout=%r" % (r.returncode, r.stdout.strip()))
+          assert r.returncode == 0, "--version failed: %r" % (r.stderr,)
+          assert "CE" in r.stdout, "version output missing CE: %r" % (r.stdout,)
+
           # --help 会把目标列表拼出来，顺带确认注册表在冻结态也是完整的
-          r2 = subprocess.run([exe, "--help"], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", timeout=120)
-          assert r2.returncode == 0, r2.stderr
+          r2 = subprocess.run([exe, "--help"], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=180)
+          assert r2.returncode == 0, "--help failed: %r" % (r2.stderr,)
           assert "kiro" in r2.stdout, "--help 里没列出 kiro"
+          print("smoke OK, size=%d bytes" % os.path.getsize(exe))
 
       - name: 改名
         shell: bash
