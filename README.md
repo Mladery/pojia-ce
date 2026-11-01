@@ -145,7 +145,23 @@ WorkBuddy 每次启动都在 `%TEMP%` 留一份自己的产品配置副本（`wo
 
 TEMP 里的副本是两个版本共用的同一个目录，按副本自身的 `dataFolderName` 认领归属，否则 `--check` 会把同一批文件在 `wb` 和 `wbintl` 底下各报一遍。
 
-### 6. 与上游的差异
+### 6. DSH 0.2.1-rc.5 适配（asar 解包 + 注入点改名）
+
+官方 DSH 桌面端升级到 `0.2.1-rc.5` 之后暴露了两个问题，都是「看起来打了、其实没打」的静默失效：
+
+**注入点常量改名。** 身份注入靠替换官方 JS 里的 intro 常量。旧版叫 `WORKSPACE_CONTEXT_INTRO` / `REPLACEMENT_WORKSPACE_CONTEXT_INTRO`，`0.2.1-rc.5` 改成了 `AGENT_INSTRUCTIONS_INTRO` / `REPLACEMENT_AGENT_INSTRUCTIONS_INTRO` / `EMPTY_REPLACEMENT_AGENT_INSTRUCTIONS_INTRO`。旧名单只认老名字，于是新版上 `patch_intro_consts` 一个都没匹配到、`apply` 报告「已是最新」，实际一个字节没写。现在新旧五个名字全认。
+
+**「部分已打」是假警报。** 判断「这份文件我们改过没有」原来用了 `SCOPE_REPLACEMENT` 这句文本，而 `0.2.1-rc.5` 的官方原文里本来就带 *These instructions are ACTIVE and MANDATORY for the stated scope* —— 结果任何一份没动过的官方文件都被判成「部分已打」。改用本工具自己的标记（`pojia-yijiantong` / `unlock-v6:h=` 等）当判据。
+
+**asar 解包的三处修正。** 桌面端真正跑的插件打包在 `resources/app.asar` 里（本机 182 MB），解包到 `resources/app/` 后才能当普通文件补：
+
+- 复用判定原来写死 `app/dsh/node_modules/@deepseek-ai` 一个路径，实际布局不符时**每次 `--check` 都重解 180 MB**（实测 `--status --target dsh` 从 4 秒变成 3 分钟跑不完）。现在两种布局都认，并且必须真的找到 `dsh-agent-instructions` 才复用；
+- 每次解包用唯一 tmp 名（带 PID），改名前**硬校验插件目录确实写出来了**才 rename —— 否则宁可失败也不装一个残缺的 `resources/app/`（DSH 优先加载它，装残了桌面端直接起不来）；
+- 文件句柄全程只开一次（原来每个文件开关一遍）；`unpacked` 标记但 `.unpacked/` 里缺文件的条目回落到 asar 数据区读，不再静默丢弃。
+
+npm 全局装的和官方安装的是**两份独立拷贝**（本机实测同为 `0.2.1-rc.5`，`index.js` 字节完全一致），补一份不影响另一份，脚本会把两份都列出来分别打。
+
+### 7. 与上游的差异
 
 截至 2026-11-01，与上游 v8.27 / 8.28 的公开文档逐条比对：
 
@@ -156,6 +172,8 @@ TEMP 里的副本是两个版本共用的同一个目录，按副本自身的 `d
 | 切换工具配置反查（wb-switch / cc-switch） | 未见 | 有 |
 | 会话快照的密钥体检 | 未见 | 有（只报脱敏形态） |
 | 安装目录发现 | Program Files / `LOCALAPPDATA` / 注册表 / 所有盘符 / 运行中进程 / npm | 同左，另加上面四条；且 DSH / ZCode 共用同一套发现 |
+| DSH `app.asar` 内插件 | 未见（只处理磁盘上散开的文件） | 解包到 `resources/app/` 再补，带完整性硬校验 |
+| DSH 0.2.1-rc.5 常量改名 | 未见 | 新旧五个 intro 常量名全认 |
 | 目标数量 | 15 | 16 |
 
 > 保留意见：上游自 v8.14 起不再公开源码，上表依据其 README 与更新日志比对，「未见」只代表文档未声明，不等于其代码中一定没有。安装目录发现一项上游明确是有的，差异在「猜固定目录名」与「按盘符 × 深度实找」之间。
@@ -165,7 +183,7 @@ TEMP 里的副本是两个版本共用的同一个目录，按副本自身的 `d
 ## 六、校验
 
 ```
-4c9ff5ca42ee676314d2ad9262ed4517578ed4ef613600512de1aec917cc5c0e  src/破甲一键通.py           (364,158 B / LF)
+dcac48af107154b03f3779c9476982c4a20a28f70a91e3d728d3be7a801432e4  src/破甲一键通.py           (369,244 B / LF)
 7b09ba3574f3c1728adc649c154dd5292a907eec08379edffe2adeba594a7e52  src/破甲GUI.py              (23,658 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
@@ -177,7 +195,7 @@ git clone https://github.com/z91772524-ai/pojia-next && cd pojia-next
 git show 536ece2:破甲一键通.py | sha256sum
 ```
 
-`src/破甲一键通.py` 现在比 `upstream/` 大 12,765 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检）。
+`src/破甲一键通.py` 现在比 `upstream/` 大 17,851 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配）。
 
 版本号分两段存：`VERSION = "8.2"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.2-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 

@@ -1454,6 +1454,56 @@ class DshTarget:
     # 目录优先于 resources/app.asar），解包后的文件就是普通磁盘文件，走常规补丁。
     # 回滚 = 删 resources/app/ 目录（app.asar 本体全程不动）。
     _ASAR_TMP = "app.asar-extract-tmp"
+    # 桌面端把插件放在 asar 根的 dsh/node_modules/@deepseek-ai 下（本机 DSH 实测如此），
+    # 也有构建直接放根 node_modules/@deepseek-ai。两个位置都要认 —— 原来只写死前者，
+    # 一旦实际布局不符，复用判定永远不成立，于是每次 --check 都要把 180 MB 的
+    # app.asar 重解一遍（本机实测：--status --target dsh 从 4 秒变成 3 分钟没跑完）。
+    _AI_SUBPATHS = (
+        ("dsh", "node_modules", "@deepseek-ai"),
+        ("node_modules", "@deepseek-ai"),
+    )
+    _AI_MARK = "dsh-agent-instructions"
+
+    @classmethod
+    def _asar_has_agent(cls, files):
+        """asar 头里是否真打包着桌面端插件（两种布局都认）。"""
+        for parts in cls._AI_SUBPATHS:
+            node = files
+            for part in parts:
+                node = node.get(part, {}).get("files", {}) if isinstance(node, dict) else {}
+            if isinstance(node, dict) and cls._AI_MARK in node:
+                return True
+        return False
+
+    @classmethod
+    def _find_ai_under(cls, app_dir):
+        """在解包出的 app/ 里找真正装着桌面端插件的 @deepseek-ai 目录；找不到返回 ""。"""
+        for parts in cls._AI_SUBPATHS:
+            p = os.path.join(app_dir, *parts)
+            if os.path.isdir(os.path.join(p, cls._AI_MARK)):
+                return p
+        return ""
+
+    @staticmethod
+    def _asar_drop(path):
+        """删目录；删不掉（回收站被策略挡住等）就改名挪开。
+
+        绝不能留下半成品：残留的 tmp 一旦被下一次解包当成"已有目录"继续往里写，
+        再整体 rename 成 app/，就会把一个残缺的 app/ 装上去 —— DSH 优先加载
+        resources/app/，那等于直接把桌面端搞坏。
+        """
+        if not os.path.isdir(path):
+            return True
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.isdir(path):
+            return True
+        aside = "%s.dead-%d" % (path, int(time.time()))
+        try:
+            os.replace(path, aside)
+            shutil.rmtree(aside, ignore_errors=True)
+            return not os.path.isdir(path)
+        except Exception:
+            return False
 
     @staticmethod
     def _asar_read_tree(asar_path):
@@ -1470,76 +1520,104 @@ class DshTarget:
         return tree.get("files", {}), 16 + json_len
 
     @classmethod
-    def _asar_write_entry(cls, asar_path, files, data_base, dest, unpacked_root, rel=""):
-        """递归写出 asar 条目。unpacked 条目从 app.asar.unpacked/ 对应路径复制。"""
+    def _asar_write_entry(cls, fh, data_base, files, dest, unpacked_root, rel="", stats=None):
+        """递归写出 asar 条目。unpacked 条目从 app.asar.unpacked/ 对应路径复制。
+
+        v8.2-CE 三处修正：
+        1. 文件句柄由调用方传进来，全程只开一次 —— 原来每个文件 open/seek 一遍，
+           几千个文件就是几千次开关，在机械盘 / 网盘上直接把解包拖成分钟级；
+        2. unpacked 标记但 .unpacked/ 里没有对应文件的条目，回落到 asar 数据区读，
+           不再静默丢弃（原来这种条目直接 continue，缺文件还没人知道）；
+        3. 统计成功 / 丢失条目数，供上层做改名前的硬校验。
+        """
         for name, ent in files.items():
             r = rel + "/" + name if rel else name
             out = os.path.join(dest, *r.split("/"))
             if "files" in ent:                              # 目录
                 os.makedirs(out, exist_ok=True)
-                cls._asar_write_entry(asar_path, ent["files"], data_base,
-                                      dest, unpacked_root, r)
+                cls._asar_write_entry(fh, data_base, ent["files"], dest,
+                                      unpacked_root, r, stats)
                 continue
             src_unpacked = os.path.join(unpacked_root, *r.split("/"))
-            if ent.get("unpacked"):                        # 解包标记条目
-                if os.path.isfile(src_unpacked):
-                    os.makedirs(os.path.dirname(out), exist_ok=True)
-                    shutil.copyfile(src_unpacked, out)
-                continue
-            off = int(ent.get("offset", "0"))
-            size = int(ent.get("size", "0"))
-            with open(asar_path, "rb") as f:
-                f.seek(data_base + off)
-                data = f.read(size)
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            with open(out, "wb") as g:
-                g.write(data)
+            wrote = False
+            if ent.get("unpacked") and os.path.isfile(src_unpacked):
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                shutil.copyfile(src_unpacked, out)
+                wrote = True
+            elif "offset" in ent:
+                off = int(ent.get("offset", "0"))
+                size = int(ent.get("size", "0"))
+                fh.seek(data_base + off)
+                data = fh.read(size)
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with open(out, "wb") as g:
+                    g.write(data)
+                wrote = True
+            if stats is not None:
+                if wrote:
+                    stats["ok"] += 1
+                else:
+                    stats["lost"] += 1
+                    if len(stats["lost_list"]) < 5:
+                        stats["lost_list"].append(r)
 
     @classmethod
     def asar_extract_agent_dir(cls, res_root):
         """res_root = <安装>/resources。返回解包出的 @deepseek-ai 目录（不需要则 ""）。
 
-        幂等 + 自动跟版：app/ 已存在且不比 app.asar 旧 → 直接复用；
-        app.asar 更新过（DSH 升级）→ 删旧 app/ 重解包。
-        原子性：先解到 app.asar-extract-tmp/，全部成功后 rename 成 app/ ——
-        中途断电只会留下半成品 tmp 目录，不会让 DSH 加载残缺的 app/。
+        幂等 + 自动跟版：app/ 已存在、不比 app.asar 旧、且里面真有插件 → 直接复用；
+        app.asar 更新过（DSH 升级）或 app/ 残缺 → 重解包。
+        原子性：先解到 app.asar-extract-tmp-<pid>/，**校验插件目录存在**后才 rename 成
+        app/ —— 中途断电 / 被超时打断只会留下半成品 tmp，不会让 DSH 加载残缺的 app/。
         """
         asar = os.path.join(res_root, "app.asar")
         if not os.path.isfile(asar):
             return ""
         app_dir = os.path.join(res_root, "app")
-        target = os.path.join(app_dir, "dsh", "node_modules", "@deepseek-ai")
         # 已解包且没过期（asar 没更新过）→ 复用
-        if os.path.isdir(target) and os.path.getmtime(asar) <= os.path.getmtime(app_dir):
-            return target
+        if os.path.isdir(app_dir) and os.path.getmtime(asar) <= os.path.getmtime(app_dir):
+            hit = cls._find_ai_under(app_dir)
+            if hit:
+                return hit
+            log("  resources/app 里没有 %s，按残缺处理并重解" % cls._AI_MARK, "y", "dsh")
         try:
             files, data_base = cls._asar_read_tree(asar)
         except Exception as e:
             log("  读 app.asar 失败：%s" % e, "red", "dsh")
             return ""
         # 确认 asar 里真打包着桌面端插件，避免对无关 asar 白干活
-        probe = files.get("dsh", {}).get("files", {}).get("node_modules", {}) \
-                      .get("files", {}).get("@deepseek-ai", {}).get("files", {})
-        if "dsh-agent-instructions" not in probe:
+        if not cls._asar_has_agent(files):
             return ""
-        tmp = os.path.join(res_root, cls._ASAR_TMP)
-        if os.path.isdir(tmp):
-            shutil.rmtree(tmp, ignore_errors=True)
+        # 每次都用唯一 tmp 名：绝不复用上一次的残留目录，避免半成品被当成成品改上去
+        tmp = os.path.join(res_root, "%s-%d" % (cls._ASAR_TMP, os.getpid()))
+        cls._asar_drop(tmp)
         os.makedirs(tmp, exist_ok=True)
+        stats = {"ok": 0, "lost": 0, "lost_list": []}
         try:
             unpacked_root = os.path.join(res_root, "app.asar.unpacked")
-            cls._asar_write_entry(asar, files, data_base, tmp, unpacked_root)
+            with open(asar, "rb") as fh:
+                cls._asar_write_entry(fh, data_base, files, tmp, unpacked_root, "", stats)
+            # 改名前的硬校验：插件目录必须真的写出来了。缺这个就等于装了个残废 app/，
+            # 而 DSH 优先加载 resources/app/，桌面端会直接起不来。
+            if not cls._find_ai_under(tmp):
+                raise RuntimeError("插件目录没写出来（%d 项已写 / %d 项缺失）"
+                                   % (stats["ok"], stats["lost"]))
             old = app_dir + ".pojia-old"
             if os.path.isdir(app_dir):
-                os.replace(app_dir, old)                # 旧版挪走
+                os.replace(app_dir, old)               # 旧版挪走
             os.replace(tmp, app_dir)                   # tmp → app（同盘原子）
             if os.path.isdir(old):
-                shutil.rmtree(old, ignore_errors=True)
+                cls._asar_drop(old)
         except Exception as e:
-            log("  解包 app.asar 失败：%s（残留 %s 可手动删）" % (e, tmp), "red", "dsh")
+            log("  解包 app.asar 失败：%s（已清掉半成品 %s）" % (e, tmp), "red", "dsh")
+            cls._asar_drop(tmp)
             return ""
-        log("  app.asar 已解包到 resources/app/（删掉该目录即回滚）", "g", "dsh")
-        return target if os.path.isdir(target) else ""
+        if stats["lost"]:
+            log("  注意：%d 个条目在 asar 与 .unpacked 里都读不到，已跳过（如 %s）"
+                % (stats["lost"], "、".join(stats["lost_list"][:3])), "y", "dsh")
+        log("  app.asar 已解包到 resources/app/（%d 个文件，删掉该目录即回滚）"
+            % stats["ok"], "g", "dsh")
+        return cls._find_ai_under(app_dir)
 
     def find_bases(self, explicit=""):
         roots, seen = [], set()
@@ -1770,10 +1848,22 @@ class DshTarget:
         return os.path.join(root, "%s.%s.bak" % (os.path.basename(fp), digest))
 
     # ---------------- 补丁函数 ----------------
-    @staticmethod
-    def patch_intro_consts(text):
+    # 注入点在官方 JS 里的常量名。0.2.1-rc.5 起官方把 WORKSPACE_CONTEXT_* 改名成
+    # AGENT_INSTRUCTIONS_*，旧名单只认老名字 → 新版上 intro 注入**静默失效**：
+    # apply 报告"已是最新"，实际一个字节都没写进去（本机 DSH 0.2.1-rc.5 实测）。
+    # 老名字保留兼容旧版，新名字补上。
+    INTRO_CONSTS = (
+        "WORKSPACE_CONTEXT_INTRO",
+        "REPLACEMENT_WORKSPACE_CONTEXT_INTRO",
+        "AGENT_INSTRUCTIONS_INTRO",
+        "REPLACEMENT_AGENT_INSTRUCTIONS_INTRO",
+        "EMPTY_REPLACEMENT_AGENT_INSTRUCTIONS_INTRO",
+    )
+
+    @classmethod
+    def patch_intro_consts(cls, text):
         changed = False
-        for name in ("WORKSPACE_CONTEXT_INTRO", "REPLACEMENT_WORKSPACE_CONTEXT_INTRO"):
+        for name in cls.INTRO_CONSTS:
             pat = re.compile(r'(const\s+' + re.escape(name) + r'\s*=\s*")([^"]*)(")')
             new, n = pat.subn(lambda m: m.group(1) + STRONG_INTRO + m.group(3), text, count=1)
             if n:
@@ -2022,7 +2112,11 @@ class DshTarget:
             return "clean", "官方 persona 本来就是空值，无需处理"
         else:
             intro = STRONG_INTRO in txt
-            scope = SCOPE_REPLACEMENT in txt \
+            # 判"我们写过"只能用本工具自己的标记，**不能用 SCOPE_REPLACEMENT** ——
+            # 0.2.1-rc.5 起官方 intro 原文里就带
+            # "These instructions are ACTIVE and MANDATORY for the stated scope"，
+            # 于是任何一份没动过的官方文件都会被判成"部分已打"，满屏假警报。
+            scope = _is_our_artifact(txt) \
                 or not any(s in txt for s in DISCLAIMER_SENTENCES)
             if intro and scope:
                 return "loose", "免责声明已升级"
@@ -2091,6 +2185,10 @@ class DshTarget:
             return "官方Web/CLI(npx缓存)"
         if "/.dsh/" in p:
             return "便携版"
+        # resources/app/ 下的是桌面端 asar 解包出来的那份（真正在跑的那份），
+        # 别和全局 npm 装的 CLI 混成一个标签 —— 两者的补丁后果不一样。
+        if "/resources/app/" in p:
+            return "桌面端(asar 解包)"
         if "node_modules/@deepseek-ai" in p:
             return "官方CLI(全局npm)"
         return "未知"
