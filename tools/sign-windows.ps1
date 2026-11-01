@@ -26,18 +26,48 @@ if (-not $Password) {
     }
 }
 
-# signtool 可能在 PATH 里，也可能在证书工具包里；两处都找一下。
-$signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
-if (-not $signtool) {
-    foreach ($p in @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "I:\Downloads\代码签名证书制作工具")) {
-        if (Test-Path -LiteralPath $p) {
-            $hit = Get-ChildItem -LiteralPath $p -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
-                   Sort-Object FullName -Descending | Select-Object -First 1
-            if ($hit) { $signtool = $hit.FullName; break }
+# signtool 不在 PATH 上是常态 —— GitHub 的 windows runner 就没配，直接 `& signtool`
+# 会报 "The term 'signtool' is not recognized"。按顺序找：
+#   1. PATH
+#   2. Windows Kits 10 的 <version>\x64 与 <version>\x86（版本号从高到低）
+#   3. Windows Kits 8.1（根目录下直接就是 x64）
+function Find-SignTool {
+    $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    $roots = @()
+    if (${env:ProgramFiles(x86)}) {
+        $roots += (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin")
+        $roots += (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\8.1\bin\x64")
+    }
+    if ($env:ProgramFiles) {
+        $roots += (Join-Path $env:ProgramFiles "Windows Kits\10\bin")
+    }
+
+    foreach ($root in $roots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        $p = Join-Path $root "signtool.exe"
+        if (Test-Path -LiteralPath $p) { return $p }
+
+        # 只往下看 <version>\<arch> 两层。整棵树递归没必要 —— bin 下几千个文件，
+        # 在 runner 上白花好几秒。
+        $versions = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                    Sort-Object Name -Descending
+        foreach ($v in $versions) {
+            foreach ($arch in @("x64", "x86")) {
+                $p = Join-Path $v.FullName "$arch\signtool.exe"
+                if (Test-Path -LiteralPath $p) { return $p }
+            }
         }
     }
+    return $null
 }
-if (-not $signtool) { throw "找不到 signtool.exe（装 Windows SDK，或把证书工具包里的那份加到 PATH）" }
+
+$signtool = Find-SignTool
+if (-not $signtool) {
+    throw "找不到 signtool.exe。装 Windows SDK 或 VS Build Tools（含 Windows 10 SDK 的 Signing Tools），或把它加到 PATH。"
+}
+Write-Host ("signtool: " + $signtool)
 
 $common = @("sign", "/f", $Pfx, "/p", $Password, "/fd", "sha256")
 if (-not $NoTimestamp) {

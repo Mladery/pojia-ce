@@ -82,24 +82,28 @@ jobs:
             Write-Host "::notice::没有配置 WINDOWS_SIGNING_PFX_BASE64，跳过签名"
             exit 0
           }
-          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          $dir = Join-Path $env:RUNNER_TEMP "signing"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $pfx = Join-Path $dir "pojia-signing.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
-          $exe = "build/dist/pojia-ce.exe"
+          # 密码走文件而不是命令行参数：进程参数在 runner 上对任何进程可见。
+          [IO.File]::WriteAllText(
+            (Join-Path $dir "pojia-signing-密码.txt"),
+            $env:PFX_PW,
+            (New-Object System.Text.UTF8Encoding($false)))
 
-          # 先带时间戳签（证书过期后签名仍有效）；TSA 不通就退回不带时间戳，
-          # 别为了一行时间戳把整个产物卡死。
-          & signtool sign /f $pfx /p $env:PFX_PW /fd sha256 /tr http://timestamp.digicert.com /td sha256 $exe
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::warning::时间戳失败，改为不带时间戳重签"
-            & signtool sign /f $pfx /p $env:PFX_PW /fd sha256 $exe
-          }
-          if ($LASTEXITCODE -ne 0) { throw "签名失败（signtool 退出码 $LASTEXITCODE）" }
+          # 调仓库里的脚本，不在这里重写一遍 signtool 查找逻辑 —— 用户本机跑的是
+          # 它，CI 跑的也该是它。signtool 不在 PATH 上是常态，脚本里会去找 Windows Kits。
+          & .\tools\sign-windows.ps1 -Exe "build/dist/pojia-ce.exe" -Pfx $pfx
+          if ($LASTEXITCODE -ne 0) { throw "签名失败（sign-windows.ps1 退出码 $LASTEXITCODE）" }
 
           # 用仓库里那份验签脚本，而不是在这里重写一遍比对逻辑 —— 让 CI 走的就是
           # 用户拿到手会走的那条路。顺带把「secret 里的 pfx」和「仓库钉的公钥证书」
           # 对一次：证书轮换了却忘了更新 tools/codesign/，这里立刻红。
-          & .\tools\verify-windows.ps1 -Exe $exe
+          & .\tools\verify-windows.ps1 -Exe "build/dist/pojia-ce.exe"
           if ($LASTEXITCODE -ne 0) { throw "验签不通过：签名者与仓库钉定的证书不一致" }
+
+          Remove-Item -Recurse -Force $dir
           Write-Host "签名 OK"
 
       - name: 冒烟：产物能跑、版本号对
