@@ -2230,6 +2230,9 @@ TPL_PROBE = os.path.join("resources", "app.asar.unpacked", "resources", "templat
 
 TASK_HOURLY = "WorkBuddyUnlockV6_Hourly"
 TASK_LOGON = "WorkBuddyUnlockV6_Logon"
+# 守护任务守哪几个目标。v8.2-CE 起把国际版也纳进来 —— 只守 wb 的话，
+# 国际版被人改回去就没人补，而两版用的是同一套靶点逻辑，没理由只护一半。
+GUARD_TARGETS = "wb,wbintl"
 ALL_TASKS = ["WorkBuddyUnlockGuard", "WorkBuddyUnlockGuard_Hourly",
              "WorkBuddyUnlockV3", "WorkBuddyUnlockV4",
              "WorkBuddyUnlockV4_Hourly", "WorkBuddyUnlockV4_Logon",
@@ -2974,7 +2977,7 @@ class WorkBuddyTarget:
                 if os.path.exists(t):
                     cands.add(os.path.abspath(t))
                 else:
-                    log("  extra-targets 跳过（不存在）: %s" % t, "y", "wb")
+                    log("  extra-targets 跳过（不存在）: %s" % t, "y", self.key)
         return sorted(cands)
 
     def js_files(self, install):
@@ -3316,7 +3319,7 @@ class WorkBuddyTarget:
         py = self._pick_quiet_python()
         # /TR 的值本身要带内层引号（路径可能有空格）；作为**单个 argv 元素**传给 schtasks，
         # 由 subprocess 在 Windows 上按 argv 规则转义，schtasks 收到的是 `"py" "脚本" --quiet`。
-        tr = '"%s" "%s" --quiet' % (py, SELF)
+        tr = '"%s" "%s" --quiet --target %s' % (py, SELF, GUARD_TARGETS)
         _m1, _rc1 = _run(["schtasks", "/Create", "/TN", TASK_HOURLY, "/SC", "MINUTE", "/MO", "30",
                           "/TR", tr, "/F"])
         argv2 = ["schtasks", "/Create", "/TN", TASK_LOGON, "/SC", "ONLOGON", "/TR", tr, "/F"]
@@ -3359,19 +3362,19 @@ class WorkBuddyTarget:
                 bad.append((t, cmd, miss, why))
         if verbose:
             for t in good:
-                log("  [正常] 守护任务 %s" % t, "g", "wb")
+                log("  [正常] 守护任务 %s" % t, "g", self.key)
             for t, cmd, miss, why in bad:
                 if why:
-                    log("  [异常] 守护任务 %s：%s" % (t, why), "red", "wb")
-                    log("         修法：以管理员身份运行 --guard install（会删掉重建）", "y", "wb")
+                    log("  [异常] 守护任务 %s：%s" % (t, why), "red", self.key)
+                    log("         修法：以管理员身份运行 --guard install（会删掉重建）", "y", self.key)
                 else:
-                    log("  [异常] 守护任务 %s 指向的不是本脚本" % t, "y", "wb")
-                log("         目标 = %s" % (cmd or "(取不到)"), "dg", "wb")
+                    log("  [异常] 守护任务 %s 指向的不是本脚本" % t, "y", self.key)
+                log("         目标 = %s" % (cmd or "(取不到)"), "dg", self.key)
                 if miss:
-                    log("         而且该文件已不存在：%s" % miss, "red", "wb")
+                    log("         而且该文件已不存在：%s" % miss, "red", self.key)
                 lr = self.task_last_result(t)
                 if lr is not None and lr not in (0, 267009, 267011):
-                    log("         上次运行结果 = %d（非 0 = 没跑成功）" % lr, "y", "wb")
+                    log("         上次运行结果 = %d（非 0 = 没跑成功）" % lr, "y", self.key)
         return good, bad
 
     # ---------------- 会话快照清理 ----------------
@@ -3476,8 +3479,8 @@ class WorkBuddyTarget:
         data_dir = self.resolve_data_dir(getattr(args, self.data_attr, "") or "")
         user, src = load_user_persona(getattr(args, "persona", "") or "")
         policy, want = build_policy(user)
-        log("人格来源：%s" % src, "dg", "wb")
-        log("安装目录：%s" % (install or "(未找到)"), "" if install else "red", "wb")
+        log("人格来源：%s" % src, "dg", self.key)
+        log("安装目录：%s" % (install or "(未找到)"), "" if install else "red", self.key)
 
         targets = self.find_targets(data_dir, install)
         jsf = self.js_files(install)
@@ -3496,9 +3499,9 @@ class WorkBuddyTarget:
                         for fn in files:
                             if fn.endswith(self.bak_suffix):
                                 n += 1
-                                log("[预演] 将还原 | %s" % os.path.join(r, fn[:-len(self.bak_suffix)]), "y", "wb")
-                log("[预演] 将处理云记忆档案 %d 份（不写盘）" % len(wb_cloudmem_candidates(data_dir)), "y", "wb")
-                log("[预演] 共需还原 %d 个文件（预演，未改盘）" % n, "y", "wb")
+                                log("[预演] 将还原 | %s" % os.path.join(r, fn[:-len(self.bak_suffix)]), "y", self.key)
+                log("[预演] 将处理云记忆档案 %d 份（不写盘）" % len(wb_cloudmem_candidates(data_dir)), "y", self.key)
+                log("[预演] 共需还原 %d 个文件（预演，未改盘）" % n, "y", self.key)
                 return {"revert": n, "dry": 1}
             for root in (data_dir, install):
                 if not root or not os.path.isdir(root):
@@ -3513,10 +3516,10 @@ class WorkBuddyTarget:
                                 n += 1
                             except Exception:
                                 pass
-            log("共恢复 %d 个文件（%s）" % (n, self.bak_suffix), "g", "wb")
+            log("共恢复 %d 个文件（%s）" % (n, self.bak_suffix), "g", self.key)
             for line in wb_cloudmem_revert(data_dir):
-                log("  云记忆：" + line, "g", "wb")
-            log("提示：还原后需重启 WorkBuddy 才生效。", "dg", "wb")
+                log("  云记忆：" + line, "g", self.key)
+            log("提示：还原后需重启 WorkBuddy 才生效。", "dg", self.key)
             return {"revert": n}
 
         dry = (mode == "dry-run") or getattr(args, "dry_run", False)
@@ -3532,16 +3535,16 @@ class WorkBuddyTarget:
                        build_persona_text(user, "WorkBuddy").replace("\r\n", "\n")
             n_cm, cm_notes = wb_cloudmem_inject(data_dir, cm_block, dry=dry)
             for ln in cm_notes:
-                log("  云记忆：" + ln, "g" if n_cm else "y", "wb")
+                log("  云记忆：" + ln, "g" if n_cm else "y", self.key)
             if n_cm and not dry:
                 log("  云记忆已就绪：WorkBuddy 每一轮都会自动注入这段（%d 字 / 上限 %d）"
-                    % (len(cm_block), CLOUDMEM_MAX), "g", "wb")
+                    % (len(cm_block), CLOUDMEM_MAX), "g", self.key)
 
         for f in targets:
             raw = read_text_safe(f)
             if raw is None:
                 stats["err"] += 1
-                log("读取失败 | %s" % f, "red", "wb")
+                log("读取失败 | %s" % f, "red", self.key)
                 continue
             as_json = f.lower().endswith(".json")
             new = raw
@@ -3581,7 +3584,7 @@ class WorkBuddyTarget:
                     if not stats.get("_up_logged"):
                         stats["_up_logged"] = 1
                         log("  检测到旧版安装（护照 %s → 本版 %s）：自动重写升级。"
-                            % (passport_version(data_dir or install) or "无护照", VER_TAG), "c", "wb")
+                            % (passport_version(data_dir or install) or "无护照", VER_TAG), "c", self.key)
                 if as_json:
                     res, _c = self.patch_json_text(new, policy, OVERLAY)
                 else:
@@ -3597,19 +3600,19 @@ class WorkBuddyTarget:
 
             rel = rel_display(f, install, data_dir)
             if dry:
-                log("[预演] 将修复 | %s%s" % (rel, (" (+%d 子句)" % clauses) if clauses else ""), "y", "wb")
+                log("[预演] 将修复 | %s%s" % (rel, (" (+%d 子句)" % clauses) if clauses else ""), "y", self.key)
                 stats["fixed"] += 1
                 continue
             self.backup_file(f)
             try:
                 write_text(f, new, bom=read_text(f)[1])
-                log("已修复 | %s%s" % (rel, (" (+%d 处残留子句)" % clauses) if clauses else ""), "g", "wb")
+                log("已修复 | %s%s" % (rel, (" (+%d 处残留子句)" % clauses) if clauses else ""), "g", self.key)
                 stats["fixed"] += 1
                 stats["clause"] += clauses
                 pending.append((f, new))          # v7.4：写完要回读核对（见下方"复查"）
             except Exception as e:
                 stats["err"] += 1
-                log("写入失败 | %s | %s" % (rel, e), "red", "wb")
+                log("写入失败 | %s | %s" % (rel, e), "red", self.key)
 
         # ---------- 命令闸门 ----------
         for p in jsf:
@@ -3620,17 +3623,17 @@ class WorkBuddyTarget:
             if cnt == 0:
                 continue
             if dry:
-                log("[预演] 将解锁命令闸门 | %s (%d 处)" % (os.path.basename(p), cnt), "y", "wb")
+                log("[预演] 将解锁命令闸门 | %s (%d 处)" % (os.path.basename(p), cnt), "y", self.key)
                 stats["gate"] += cnt
                 continue
             self.backup_file(p)
             try:
                 write_text(p, new, bom=read_text(p)[1])
-                log("闸门已解锁 | %s (%d 处)" % (os.path.basename(p), cnt), "g", "wb")
+                log("闸门已解锁 | %s (%d 处)" % (os.path.basename(p), cnt), "g", self.key)
                 stats["gate"] += cnt
             except Exception as e:
                 stats["err"] += 1
-                log("闸门写入失败 | %s | %s" % (p, e), "red", "wb")
+                log("闸门写入失败 | %s | %s" % (p, e), "red", self.key)
 
         # ---------- 网页过滤 ----------
         if (full or getattr(args, "web_filter", False)) and not dry:
@@ -3639,7 +3642,7 @@ class WorkBuddyTarget:
                 if WF_OLD in txt:
                     self.backup_file(p)
                     write_text(p, txt.replace(WF_OLD, WF_NEW), bom=read_text(p)[1])
-                    log("网页过滤已解除 | %s" % os.path.basename(p), "g", "wb")
+                    log("网页过滤已解除 | %s" % os.path.basename(p), "g", self.key)
 
         # ---------- 清运行时缓存 ----------
         if not dry and not getattr(args, "keep_cache", False):
@@ -3647,7 +3650,7 @@ class WorkBuddyTarget:
             if os.path.exists(cache):
                 try:
                     os.remove(cache)
-                    log("已清除运行时缓存（下次启动从已破甲的 product.json 重建）", "g", "wb")
+                    log("已清除运行时缓存（下次启动从已破甲的 product.json 重建）", "g", self.key)
                 except Exception:
                     pass
 
@@ -3663,17 +3666,17 @@ class WorkBuddyTarget:
                 n, size = self.clear_session_spill(data_dir, 24, _purge)
                 if n:
                     log("已清理会话快照 %d 份（%.1f MB）%s"
-                        % (n, size / 1048576.0, "（全部）" if _purge else "（24 小时以前的）"), "g", "wb")
+                        % (n, size / 1048576.0, "（全部）" if _purge else "（24 小时以前的）"), "g", self.key)
             else:
                 _rows = spill_rows(data_dir, 24)
                 if _rows:
-                    log("磁盘上的历史副本（默认不清理，先看看现状）：", "dg", "wb")
+                    log("磁盘上的历史副本（默认不清理，先看看现状）：", "dg", self.key)
                     for st, note, detail in _rows:
-                        log("  · %s" % note, "y" if st == "warn" else "", "wb")
+                        log("  · %s" % note, "y" if st == "warn" else "", self.key)
                         if detail:
-                            log("    %s" % detail, "dg", "wb")
+                            log("    %s" % detail, "dg", self.key)
                     log("  本工具没有删它们：这些副本不在备份范围内，删了 --revert 也找不回来。"
-                        "要清就明说 —— --clean-spill 只清过期的那批，--purge-spill 全清。", "dg", "wb")
+                        "要清就明说 —— --clean-spill 只清过期的那批，--purge-spill 全清。", "dg", self.key)
 
         # ---------- 复查 ----------
         # v7.4 重写：原来只统计"文件里含 <content_policy> 且 is_prompt_tpl() 且判定为空"的靶点，
@@ -3689,27 +3692,27 @@ class WorkBuddyTarget:
                     bad += 1
                     stats["err"] += 1
                     log("  写入未生效（回读不一致）: %s"
-                        % rel_display(f, install, data_dir), "red", "wb")
+                        % rel_display(f, install, data_dir), "red", self.key)
             for f in targets:
                 t = read_text_safe(f) or ""
                 if ("<content_policy>" in t) and self.is_prompt_tpl(t) and loose_state(t, want) == "":
                     bad += 1
-                    log("  未生效: %s" % rel_display(f, install, data_dir), "red", "wb")
+                    log("  未生效: %s" % rel_display(f, install, data_dir), "red", self.key)
             for p in jsf:
                 if not self.test_js_gate_open(read_text_safe(p) or ""):
                     bad += 1
-                    log("  闸门未生效: %s" % os.path.basename(p), "red", "wb")
+                    log("  闸门未生效: %s" % os.path.basename(p), "red", self.key)
             log("复查：%s" % ("全部就绪" if bad == 0 else "%d 处未生效" % bad),
-                "g" if bad == 0 else "red", "wb")
+                "g" if bad == 0 else "red", self.key)
 
         if stats.get("other"):
             log("其中 %d 个已是宽松版、但人格哈希来自上一版 -> 默认跳过不重写"
-                "（要统一成本脚本的人格，加 --force）" % stats["other"], "dg", "wb")
+                "（要统一成本脚本的人格，加 --force）" % stats["other"], "dg", self.key)
         log("小结 | 修复 %d / 跳过 %d / 错误 %d / 闸门 %d" %
-            (stats["fixed"], stats["skip"], stats["err"], stats["gate"]), "", "wb")
+            (stats["fixed"], stats["skip"], stats["err"], stats["gate"]), "", self.key)
 
         if getattr(args, "restart_wb", False) and not dry and install:
-            log("正在重启 WorkBuddy...", "y", "wb")
+            log("正在重启 WorkBuddy...", "y", self.key)
             _run(["taskkill", "/IM", "WorkBuddy.exe", "/F"])
             time.sleep(3)
             exe = None
@@ -3722,13 +3725,13 @@ class WorkBuddyTarget:
             if exe:
                 try:
                     subprocess.Popen([exe], cwd=os.path.dirname(exe))
-                    log("已重新启动 WorkBuddy", "g", "wb")
+                    log("已重新启动 WorkBuddy", "g", self.key)
                 except Exception as e:
-                    log("启动失败：%s" % e, "red", "wb")
+                    log("启动失败：%s" % e, "red", self.key)
             else:
-                log("未找到 WorkBuddy.exe，请手动打开", "y", "wb")
+                log("未找到 WorkBuddy.exe，请手动打开", "y", self.key)
         elif not dry:
-            log("请完全退出 WorkBuddy（含右下角托盘）再重开，改动才生效。", "y", "wb")
+            log("请完全退出 WorkBuddy（含右下角托盘）再重开，改动才生效。", "y", self.key)
 
         # 护照 + 回执行：**每次 apply 都写**（v7.2 修）
         # 原来挂在 stats["fixed"] 上 —— 于是"模板全都已是最新"的那一轮就不写护照，
@@ -3748,9 +3751,9 @@ class WorkBuddyTarget:
                 pp["history"] = old_pp.get("history", [])
                 save_passport(anchor, pp)
                 _ok, note = write_receipts(anchor, self.key, dry=False)
-                log("%s（%s）" % (note, signal_path_for(os.path.join(avatar_dir_for(anchor), "passport.json"))), "g", "wb")
+                log("%s（%s）" % (note, signal_path_for(os.path.join(avatar_dir_for(anchor), "passport.json"))), "g", self.key)
                 log("  自证：新会话里单独发「%s」，应回复：%s"
-                    % (PASSPHRASE, SIGNAL_REPLY), "c", "wb")
+                    % (PASSPHRASE, SIGNAL_REPLY), "c", self.key)
         return stats
 
     # ---------------- 体检（--check 用，只读） ----------------
@@ -3914,7 +3917,7 @@ class WorkBuddyTarget:
                                                  ("`%s`" % b["sha256"][:16]) if b["exists"] else "-"))
         lines += ["", "宽松模板：本版本 %d 个 / 旧人格 %d 个 / 合计 %d" % (loose, other, len(recs)), ""]
         write_text(os.path.join(out, "当前提示词快照.md"), "\r\n".join(lines))
-        log("快照已生成：%s" % out, "g", "wb")
+        log("快照已生成：%s" % out, "g", self.key)
         return out
 
     def do_compare(self):
@@ -3923,11 +3926,11 @@ class WorkBuddyTarget:
         READONLY = True
         d = self.latest_snapshot()
         if not d:
-            log("没有快照目录，先跑一次 --snapshot", "y", "wb")
+            log("没有快照目录，先跑一次 --snapshot", "y", self.key)
             return
         sj = os.path.join(d, "snapshot.json")
         if not os.path.exists(sj):
-            log("快照目录里没有 snapshot.json", "red", "wb")
+            log("快照目录里没有 snapshot.json", "red", self.key)
             return
         snap = json.loads(read_text(sj)[0])
         install, data_dir = snap.get("install_dir", ""), snap.get("data_dir", "")
@@ -3955,15 +3958,15 @@ class WorkBuddyTarget:
                 same += 1
             else:
                 chg.append(t["rel"])
-        log("基准：%s" % snap.get("created", "?"), "dg", "wb")
-        log("相同 %d 个" % same, "g", "wb")
-        log("已变 %d 个" % len(chg), "y" if chg else "g", "wb")
+        log("基准：%s" % snap.get("created", "?"), "dg", self.key)
+        log("相同 %d 个" % same, "g", self.key)
+        log("已变 %d 个" % len(chg), "y" if chg else "g", self.key)
         for c in chg:
-            log("     " + c, "y", "wb")
+            log("     " + c, "y", self.key)
         if mis:
-            log("缺失 %d 个" % len(mis), "dg", "wb")
+            log("缺失 %d 个" % len(mis), "dg", self.key)
         log("结论：%s" % ("破甲完好，没有被改回去。" if not chg else "有文件与基准不一致，重跑一次 --apply --target wb 即可。"),
-            "g" if not chg else "y", "wb")
+            "g" if not chg else "y", self.key)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7083,7 +7086,9 @@ def build_parser():
     p.add_argument("--cursor-dir", help="手动指定 Cursor 配置目录（一般是 用户目录\\.cursor）")
     p.add_argument("--claude-dir", help="手动指定 Claude 配置目录（一般是 用户目录\\.claude）")
     p.add_argument("--yes", "-y", action="store_true", help="非交互，不二次确认")
-    p.add_argument("--quiet", action="store_true", help="静默（守护任务用）")
+    p.add_argument("--quiet", action="store_true",
+                   help="静默（守护任务用）：等价于 --apply --yes；--target 未指定或为 all 时只打 wb，"
+                        "要连国际版一起守就写 --target wb,wbintl")
     p.add_argument("--version", action="version", version="破甲一键通 " + VER_TAG)
     p.add_argument("--gui", action="store_true",
                    help="打开图形界面（本机网页 UI，零依赖）")
@@ -7195,9 +7200,13 @@ def main():
         return
 
     # ---- 守护任务静默调用：直接跑标准破甲 ----
+    # v8.2-CE：原来无条件把 target 压成 "wb"，于是守护任务永远护不到国际版 ——
+    # 命令行写 `--quiet --target wbintl` 也会被这句覆盖回去，用户以为设了其实没设。
+    # 现在只在没指定（默认 all）时才回落 wb；显式给了 target 就照给的来。
     if args.quiet:
         args.apply = True
-        args.target = "wb"
+        if (getattr(args, "target", "") or "").strip().lower() in ("", "all", "*"):
+            args.target = "wb"
         args.yes = True
 
     # ---- 体检（只读，永不改盘） ----

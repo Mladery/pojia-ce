@@ -77,6 +77,8 @@ python src/破甲一键通.py --revert --target wb
 
 别名 `wbai` / `workbuddy-ai` / `workbuddy-intl`，手动指定用 `--wbintl-install` / `--wbintl-data`。
 
+守护任务（`--guard install`）两个版本一起守，写进任务的是 `--quiet --target wb,wbintl`。上游那版 `--quiet` 会把 target 无条件压成 `wb`，写什么都被覆盖，所以国际版从来没被守过。
+
 ### 2. 安装根发现增强
 
 原来的定位链只认 `Program Files`、`LOCALAPPDATA\Programs` 和盘符根下几个固定目录名。实际装机大量是「自定义盘符 + 自定义一级目录」—— `J:\Workbuddy-GLOBAL\WorkBuddyAI`、`H:\Workbuddy`、`J:\wb\WorkBuddyManager` 都属于这一类，固定候选一个都命中不了。新增三条线索：
@@ -145,7 +147,7 @@ TEMP 里的副本是两个版本共用的同一个目录，按副本自身的 `d
 ## 六、校验
 
 ```
-2c691954acd9ee1fd300c78bd8480aaea37549cf06ca74df54dd575d16d8df47  src/破甲一键通.py           (354,277 B / LF)
+138f9de058fc170d7904cdf6525151a352b5d19fb01f63fc3f7c735a5148946f  src/破甲一键通.py           (355,329 B / LF)
 7b09ba3574f3c1728adc649c154dd5292a907eec08379edffe2adeba594a7e52  src/破甲GUI.py              (23,658 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
@@ -157,7 +159,7 @@ git clone https://github.com/z91772524-ai/pojia-next && cd pojia-next
 git show 536ece2:破甲一键通.py | sha256sum
 ```
 
-`src/破甲一键通.py` 现在比 `upstream/` 大 2,884 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检）。
+`src/破甲一键通.py` 现在比 `upstream/` 大 3,936 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检）。
 
 版本号分两段存：`VERSION = "8.2"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.2-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
