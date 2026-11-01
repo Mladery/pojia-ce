@@ -1944,6 +1944,229 @@ def guard_rows(dsh_home):
     return [("info", "运行时守卫：未安装（apply 时自动装）", "")]
 
 
+# ---- DSH 破甲方式二：破甲模式（社区特供） -----------------------------------
+# DSH 下拉里的「标准 / PTC / 极简 / 创造」本质上是四份 Agent 预设 ——
+# 由 `@deepseek-ai/dsh-agent-preset` 注册的 {id, name, description, order, plugins}。
+# 所以"破甲"不一定要改官方文件：往 profile 的 patch 层插一条预设，人格写进它的
+# persona.prefix，用户从模式下拉里选中才生效、不选就等于没装。
+# 这条路线的好处很直接：不碰 index.js、不改别人插件包的 cordis.patch.yml，
+# 宿主升级覆盖文件也不会把人格冲掉。
+PRESET_ID = "pojia"
+PRESET_ROW = "preset-pojia"
+PRESET_MARK = "pojia-preset"
+PRESET_NAME = "破甲模式"
+PRESET_DESC = "社区特供：人格与政策内置在本模式里，选它即生效，不改任何官方文件。"
+# 下拉排序：standard=1 / ptc=2 / minimal=3 / cordis=4。1.5 让它落在第二位。
+PRESET_ORDER = "1.5"
+
+
+def dsh_profiles(dsh_home):
+    """<DSH_HOME>/profiles/* 下所有带 cordis.patch.yml 的 profile 目录。
+
+    desktop 与 web 是两个独立 profile，只认死一个的话，另一边下拉里就没有破甲模式。
+    """
+    root = os.path.join(dsh_home or "", "profiles")
+    if not root or not os.path.isdir(root):
+        return []
+    out = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    for n in names:
+        d = os.path.join(root, n)
+        if os.path.isdir(d) and os.path.isfile(os.path.join(d, "cordis.patch.yml")):
+            out.append(d)
+    return out
+
+
+def preset_std_file(base):
+    """已安装的 standard 预设文件 —— 工具清单从它克隆，不自己硬编码一份。"""
+    p = os.path.join(base or "", "dsh-web-app", "presets", "standard.patch.yml")
+    return p if os.path.isfile(p) else ""
+
+
+def preset_plugins_block(std_txt, prefix_text):
+    """把 standard 的 plugins 段原样搬过来，只换掉 persona.prefix。
+
+    为什么按文本搬、不解析 YAML：一是标准库没有 YAML；二是硬编码一份工具清单，
+    宿主升级加了/删了工具就和我们写死的那份对不上（少一个工具 = 半个残废模式）。
+    文本搬运只动唯一那一行，版本怎么变都跟得上。
+    """
+    lines = (std_txt or "").replace("\r\n", "\n").split("\n")
+    start = -1
+    for i, ln in enumerate(lines):
+        if ln.strip() == "plugins:":
+            start = i
+            break
+    if start < 0:
+        return ""
+    block = lines[start + 1:]
+    while block and not block[-1].strip():
+        block.pop()
+
+    out, i, done = [], 0, False
+    while i < len(block):
+        ln = block[i]
+        if not done and ln.strip().startswith("prefix:"):
+            indent = len(ln) - len(ln.lstrip(" "))
+            # 单行 JSON 字符串：YAML 的双引号标量接受 JSON 转义，省掉块标量的缩进对齐。
+            out.append(" " * indent + "prefix: " + json.dumps(prefix_text, ensure_ascii=False))
+            done = True
+            i += 1
+            # 原文若写成块标量（prefix: >- 后跟缩进续行），续行一起丢掉
+            while i < len(block):
+                nxt = block[i]
+                if nxt.strip() and (len(nxt) - len(nxt.lstrip(" "))) <= indent:
+                    break
+                i += 1
+            continue
+        out.append(ln)
+        i += 1
+    return "\n".join(out) if done else ""
+
+
+def preset_row_text(plugins_block):
+    """整条预设声明。首尾两行注释是标记 —— 卸载时按标记整段摘，不靠猜缩进。"""
+    q = lambda s: json.dumps(s, ensure_ascii=False)
+    head = (
+        "# >>> " + PRESET_MARK + "  " + PRESET_NAME + "（社区特供）\n"
+        "# 由破甲一键通写入：人格内置在本预设里，不改任何官方文件。删掉这一段即等于卸载。\n"
+        "- insert:\n"
+        "    - id: " + PRESET_ROW + "\n"
+        "      name: '@deepseek-ai/dsh-agent-preset'\n"
+        "      config:\n"
+        "        id: " + PRESET_ID + "\n"
+        "        name: " + q(PRESET_NAME) + "\n"
+        "        description: " + q(PRESET_DESC) + "\n"
+        "        order: " + PRESET_ORDER + "\n"
+        "        plugins:\n"
+    )
+    return head + plugins_block + "\n# <<< " + PRESET_MARK + "\n"
+
+
+def preset_state(dsh_home):
+    """返回 (状态, 说明)。状态取 ok / warn / none / na。"""
+    profs = dsh_profiles(dsh_home)
+    if not profs:
+        return "na", "破甲模式：无 profiles/*（非桌面版布局，不适用）"
+    hit = 0
+    for prof in profs:
+        try:
+            txt, _b = read_text(os.path.join(prof, "cordis.patch.yml"))
+            if ("id: " + PRESET_ROW) in (txt or ""):
+                hit += 1
+        except Exception:
+            pass
+    if hit == len(profs):
+        return "ok", "破甲模式：已注册（%d 个 profile），新建任务时可在模式下拉里选" % hit
+    if hit:
+        return "warn", "破甲模式：只在 %d/%d 个 profile 里注册 —— 重跑 --apply --dsh-mode preset 补齐" \
+                       % (hit, len(profs))
+    return "none", "破甲模式：未注册（--dsh-mode preset 装上）"
+
+
+def preset_rows(dsh_home):
+    st, note = preset_state(dsh_home)
+    kind = {"ok": "ok", "warn": "warn", "none": "info", "na": "dg"}.get(st, "info")
+    return [(kind, note, "")]
+
+
+def preset_install(dsh_home, bases, prefix_text, dry=False):
+    """把破甲模式插进每个 profile 的 patch 层。幂等。"""
+    profs = dsh_profiles(dsh_home)
+    if not profs:
+        return False, "未找到 profiles/*/cordis.patch.yml（非桌面版布局），跳过破甲模式"
+    std = ""
+    for b in bases or []:
+        std = preset_std_file(b)
+        if std:
+            break
+    if not std:
+        return False, "没找到 standard 预设（dsh-web-app/presets/standard.patch.yml），无法克隆工具清单"
+    try:
+        std_txt = read_text(std)[0] or ""
+    except Exception as e:
+        return False, "读 standard 预设失败：%s" % e
+    block = preset_plugins_block(std_txt, prefix_text)
+    if not block:
+        return False, "standard 预设里没有 plugins 段或 persona.prefix，这个版本的布局不认识"
+    row = preset_row_text(block)
+
+    done = []
+    for prof in profs:
+        yml = os.path.join(prof, "cordis.patch.yml")
+        tag = os.path.basename(prof)
+        try:
+            txt, bom = read_text(yml)
+            txt = txt or ""
+            if ("id: " + PRESET_ROW) in txt:
+                done.append(tag + " 已有")
+                continue
+            if dry:
+                done.append(tag + " 将插入")
+                continue
+            _guard_keep(yml, PRESET_MARK)
+            if txt and not txt.endswith("\n"):
+                txt += "\n"
+            write_text(yml, txt + row, bom=bom)
+            done.append(tag + " 已插入")
+        except Exception as e:
+            return False, "%s 更新失败：%s" % (tag, e)
+
+    head = "破甲模式将写入" if dry else "破甲模式已写入"
+    tail = "" if dry else "，重启 DSH 后新建任务即可在模式下拉里选「%s」" % PRESET_NAME
+    return True, "%s（%s）%s" % (head, "、".join(done), tail)
+
+
+def _preset_drop_entry(txt):
+    """按标记整段摘掉我们那条 insert（首尾注释一起走）。"""
+    lines = (txt or "").split("\n")
+    out, i, skipping = [], 0, False
+    while i < len(lines):
+        ln = lines[i]
+        if ln.lstrip().startswith("# >>> " + PRESET_MARK):
+            skipping = True
+            i += 1
+            continue
+        if skipping:
+            if ln.lstrip().startswith("# <<< " + PRESET_MARK):
+                skipping = False
+            i += 1
+            continue
+        out.append(ln)
+        i += 1
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out) + "\n" if out else ""
+
+
+def preset_remove(dsh_home, dry=False):
+    profs = dsh_profiles(dsh_home)
+    if not profs:
+        return False, "无 profiles/*（不适用）"
+    done = []
+    for prof in profs:
+        yml = os.path.join(prof, "cordis.patch.yml")
+        tag = os.path.basename(prof)
+        try:
+            txt, bom = read_text(yml)
+            txt = txt or ""
+            if ("id: " + PRESET_ROW) not in txt:
+                continue
+            if dry:
+                done.append(tag + " 将移除")
+                continue
+            _guard_keep(yml, PRESET_MARK + "-rm")
+            write_text(yml, _preset_drop_entry(txt), bom=bom)
+            done.append(tag + " 已移除")
+        except Exception as e:
+            return False, "%s 移除失败：%s" % (tag, e)
+    if not done:
+        return True, "破甲模式未注册，无需移除"
+    return True, "破甲模式已移除（%s）" % "、".join(done)
+
+
 class DshTarget:
     key = "dsh"
     label = "DSH (DeepSeek Harness)"
@@ -2849,6 +3072,7 @@ class DshTarget:
             elif fs:
                 rows.append(("ok", "Electron 保险丝正常（OnlyLoadAppFromAsar 已关）", ""))
         rows.extend(guard_rows(self.dsh_home()))
+        rows.extend(preset_rows(self.dsh_home()))
         rows.extend(host_overwrite_rows(self.dsh_home(), "DSH"))
         procs = self.running()
         if procs:
@@ -2910,6 +3134,14 @@ class DshTarget:
         persona = build_persona_text(user)
         _pol, want = build_policy(user)
         log("人格来源：%s" % src, "dg", "dsh")
+        # 两种破甲方式（用户自己选）：
+        #   inject —— 改磁盘上的 persona / 免责句，全模式生效（默认，老行为）
+        #   preset —— 只注册一个「破甲模式」，不碰任何官方文件（社区特供）
+        _how = (getattr(args, "dsh_mode", "") or "inject").strip().lower()
+        preset_mode = (_how == "preset") and mode != "revert"
+        if preset_mode:
+            log("破甲方式：破甲模式（社区特供）—— 不改任何官方文件，只在模式下拉里多一项",
+                "c", "dsh")
 
         # 先把保险丝处理掉再打补丁：桌面端的 app.asar 没更新、resources/app/ 还能复用，
         # 但熔丝可能在客户端升级时被重新烧上 —— 那种情况下我们一个字节都改不到它。
@@ -2969,6 +3201,9 @@ class DshTarget:
                          % (passport_persona_hash(self.dsh_home())[:12] or "?", want[:12]))
             log("检测到需要统一重写：%s：DSH 靶点将自动升级。" % _why, "c", "dsh")
         for b in bases:
+            if preset_mode:
+                # 破甲模式路线一个字节都不改 —— 整轮注入直接跳过。
+                break
             for fp, funcs in self.collect_targets(b):
                 if mode == "revert":
                     # v7.4 修：这里原来没有 dry 判断 —— `--revert --dry-run` 会**真的写盘**并删掉备份。
@@ -3070,11 +3305,15 @@ class DshTarget:
                     stats["err"] += 1
                     log("写入失败 | %s | %s" % (fp, e), "red", "dsh")
         if mode == "apply":
-            manifest_save(self.key, touched)
+            if not preset_mode:
+                # 破甲模式没动任何靶点文件，清单保持原样 —— 顺手清空等于把上一轮的
+                # 注入记录抹掉，之后 revert 就找不到那些文件了。
+                manifest_save(self.key, touched)
             h = self.dsh_home()
             # 护照 + 回执行：**每次 apply 都写**（v7.2 修）—— 原来挂在 stats["fixed"] 上，
             # 于是"全都已是最新"的那一轮不写，版本号停在旧值、升级判据跟着失真。
-            pp = passport_new(self.key, h, "", "", "policy", persona_hash=want)
+            pp = passport_new(self.key, h, "", "", "preset" if preset_mode else "policy",
+                              persona_hash=want)
             pp["bases"] = bases
             pp["patched_files"] = touched[:200]
             # v8.1：补丁戳 —— 只对"本轮真正写成功"的文件取 sha（写失败的在
@@ -3094,12 +3333,26 @@ class DshTarget:
                 log(_gnote, "g" if _gok else "y", "dsh")
             except Exception as _ge:
                 log("运行时守卫安装异常（补丁不受影响）：%s" % _ge, "y", "dsh")
+            if preset_mode:
+                try:
+                    _pok, _pnote = preset_install(
+                        h, bases, STRONG_INTRO + "\n\n" + persona, dry=False)
+                    log(_pnote, "g" if _pok else "y", "dsh")
+                except Exception as _pe:
+                    log("破甲模式写入异常：%s" % _pe, "y", "dsh")
         elif mode == "dry-run":
             try:
                 _gok, _gnote = guard_install(self.dsh_home(), dry=True)
                 log("[预演] " + _gnote, "y", "dsh")
             except Exception:
                 pass
+            if preset_mode:
+                try:
+                    _pok, _pnote = preset_install(
+                        self.dsh_home(), bases, STRONG_INTRO + "\n\n" + persona, dry=True)
+                    log("[预演] " + _pnote, "y" if _pok else "dg", "dsh")
+                except Exception as _pe:
+                    log("破甲模式预演异常：%s" % _pe, "y", "dsh")
         elif mode == "revert":
             # v7.4：还原后要**清掉护照与回执行** —— 以前 DSH 还原完护照还在，
             # 于是一跑 --status 就显示「护照 v7.4（本版）」，用户以为补丁还装着。
@@ -3129,6 +3382,12 @@ class DshTarget:
                     log(_rnote, "g" if _rok else "y", "dsh")
                 except Exception as _re2:
                     log("运行时守卫卸载异常：%s" % _re2, "y", "dsh")
+                # 破甲模式是独立装的一层，还原时一并摘掉（没装就什么都不做）。
+                try:
+                    _mok, _mnote = preset_remove(h, dry=getattr(args, "dry_run", False))
+                    log(_mnote, "g" if _mok else "y", "dsh")
+                except Exception as _me:
+                    log("破甲模式移除异常：%s" % _me, "y", "dsh")
         return stats
 
     def revert_file(self, fp):
@@ -8042,6 +8301,8 @@ def menu(args):
             elif c == "4":
                 sel = _pick_targets(args, "预演 —— 选要预演的目标")
                 if sel:
+                    if "dsh" in sel:
+                        _ask_dsh_mode(args)
                     run_action(args, "dry-run", sel)
             elif c == "5":
                 sel = _pick_targets(args, "单打 —— 选要处理的目标")
@@ -8159,6 +8420,26 @@ def _confirm(text):
         return False
 
 
+def _ask_dsh_mode(args):
+    """让用户选 DSH 的破甲方式。回车 = 注入模式（老行为，不改变默认）。"""
+    say("")
+    say("  DSH 破甲方式（两种，选一种）：", "c")
+    say("    [1] 注入模式    改磁盘上的 persona / 免责句，所有模式都生效（默认）", "g")
+    say("    [2] 破甲模式    社区特供：不改任何官方文件，只在模式下拉里多一项「破甲模式」", "g")
+    say("                    选中它才生效，宿主升级也不会把人格冲掉", "g")
+    say("    直接回车 = 注入模式。", "dg")
+    try:
+        c = input("  选择 (1/2) > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        c = ""
+    if c == "2":
+        args.dsh_mode = "preset"
+        say("  已选：破甲模式（社区特供）", "g")
+    else:
+        args.dsh_mode = "inject"
+    return True
+
+
 def _confirm_and_run(args, mode, sel):
     say("")
     label = dict(TARGET_LABEL)             # v8.0：不再写死
@@ -8166,6 +8447,8 @@ def _confirm_and_run(args, mode, sel):
     # v7.6：只在真的会碰 DSH 时才提 DSH 进程的事，选了别的还说就是噪声。
     if "dsh" in sel:
         say("  DSH 正在运行的进程不会被结束（要结束用 --kill-dsh）。", "dg")
+        if mode != "revert":
+            _ask_dsh_mode(args)
     if _confirm("确认执行？"):
         run_action(args, mode, sel)
     else:
@@ -8324,6 +8607,10 @@ def build_parser():
     p.add_argument("--clear", action="store_true",
                    help="配合 --pick 用：清除记住的手动路径，改回自动探测")
     p.add_argument("--dsh-dir", help="手动指定 @deepseek-ai 目录或 DSH Desktop 根")
+    p.add_argument("--dsh-mode", dest="dsh_mode", choices=["inject", "preset"], default="inject",
+                   help="DSH 破甲方式：inject=改磁盘文件（默认）；"
+                        "preset=只注册「破甲模式」预设（社区特供，不改任何官方文件，"
+                        "在模式下拉里选中才生效）")
     p.add_argument("--zcode-dir", help="手动指定 ZCode 配置目录（一般是 用户目录\\.zcode）")
     p.add_argument("--zcode-cjs", help="手动指定 ZCode 的 resources\\glm\\zcode.cjs（自定义安装路径时用）")
     p.add_argument("--zpatch", action="store_true",

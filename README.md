@@ -305,7 +305,48 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 
 CI 签完会直接调 `tools/verify-windows.ps1` 复验一遍。这一步不只是确认签上了，还在**核对两个来源**：secret 里的 pfx 和仓库钉的公钥证书必须是同一张。哪天证书轮换了却忘了同步 `tools/codesign/`，构建当场红，而不是等到用户验签失败才发现。
 
-### 14. DSH 运行时守卫（拒答续命 / 异常续跑）
+### 14. DSH 破甲方式：注入 / 破甲模式（二选一）
+
+DSH 有两种破法，`--apply --target dsh` 时自己挑（交互菜单会问，CLI 用 `--dsh-mode`）：
+
+| 方式 | 命令 | 改了什么 | 生效范围 |
+|---|---|---|---|
+| **注入模式**（默认） | `--dsh-mode inject` | 磁盘上的 `persona` / 免责句（见下节表格） | 所有模式、所有会话 |
+| **破甲模式**（社区特供） | `--dsh-mode preset` | **一个官方文件都不改**，只在 profile 的 patch 层注册一条预设 | 只有选中「破甲模式」的会话 |
+
+破甲模式走的是 DSH 自己的预设机制：下拉里的「标准 / PTC / 极简 / 创造」本质就是四份
+`@deepseek-ai/dsh-agent-preset` 声明，所以再插一条就是第五个模式。人格写在它的
+`persona.prefix` 里，`order: 1.5` 让它排在「标准模式」后面、成为第二项。
+
+```yaml
+# 追加到 <DSH_HOME>/profiles/*/cordis.patch.yml
+# >>> pojia-preset  破甲模式（社区特供）
+- insert:
+    - id: preset-pojia
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: pojia
+        name: 破甲模式
+        description: 社区特供：人格与政策内置在本模式里，选它即生效，不改任何官方文件。
+        order: 1.5
+        plugins: [ …从已安装的 standard 预设整段克隆，只换 persona.prefix… ]
+# <<< pojia-preset
+```
+
+几点取舍：
+
+- **工具清单不硬编码**：从本机已安装的 `dsh-web-app/presets/standard.patch.yml` 文本级克隆，
+  宿主升级加删工具也跟着走；写死一份的话版本一变就少工具，变成半个残废模式。
+- **只动一行**：克隆后仅替换 `persona.prefix`（单行 JSON 字符串，避免块标量的缩进坑）。
+- **两个 profile 都写**：`profiles/desktop` 和 `profiles/web` 是独立的，只写一个另一边下拉里就没有。
+- **整段带标记**：首尾 `# >>> pojia-preset` / `# <<< pojia-preset`，卸载按标记整段摘，
+  不靠猜缩进；改前留 `cordis.patch.yml.pojia-preset.bak`。
+- `--revert` 会连它一起摘掉；`--check` 报「已注册 / 半安装（只在部分 profile）/ 未注册」。
+
+想省事又不想让宿主升级冲掉人格，就选破甲模式；想让所有模式都带上，就用注入模式。
+两者不冲突，但**同时用没有意义** —— 注入模式已经把人格写进磁盘了。
+
+### 15. DSH 运行时守卫（拒答续命 / 异常续跑）
 
 人格块是**磁盘层**：会话一开始读进去，中途就不再看。模型聊到一半突然「抱歉，我不能…」，人格块一点办法没有 —— 它不在那条路上。
 
@@ -333,7 +374,7 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 
 插件本身零依赖、纯 ESM，只做上面那张表里的事；没有网络请求，不读用户内容，不写任何文件。
 
-### 15. 与上游的差异
+### 16. 与上游的差异
 
 截至 2026-11-01，与上游最新公开文档逐条比对：
 
@@ -364,7 +405,7 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 ## 六、校验
 
 ```
-a6810ebfccdec681528c9fea5185763e689701f259bc991c7d46ee30dba525c5  src/破甲一键通.py           (413,920 B / LF)
+7bde1596ad63f1eab80b9d480da66360bacf63dac4f71695777921ee707464df  src/破甲一键通.py           (426,294 B / LF)
 e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
