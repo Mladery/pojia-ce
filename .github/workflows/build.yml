@@ -29,12 +29,13 @@ jobs:
       fail-fast: false
       matrix:
         # 四种产物覆盖绝大多数人：Windows x64、Linux x64、Intel Mac、Apple Silicon Mac。
-        # macos-13 是最后一个 x86_64 的 GitHub 托管镜像；macos-latest 已经是 arm64。
+        # Intel Mac 用 macos-15-intel —— macos-13 已经不在受支持列表里（GitHub 现在只
+        # 提供 macos-15-intel / macos-26-intel 两个 x64 镜像），留着它会在队列里躺几十分钟。
         include:
-          - { os: windows-latest, py: "3.11", asset: windows-x64, ext: ".exe" }
-          - { os: ubuntu-latest,  py: "3.11", asset: linux-x64,   ext: ""     }
-          - { os: macos-13,       py: "3.11", asset: macos-x64,   ext: ""     }
-          - { os: macos-latest,   py: "3.11", asset: macos-arm64, ext: ""     }
+          - { os: windows-latest,  py: "3.11", asset: windows-x64, ext: ".exe" }
+          - { os: ubuntu-latest,   py: "3.11", asset: linux-x64,   ext: ""     }
+          - { os: macos-15-intel,  py: "3.11", asset: macos-x64,   ext: ""     }
+          - { os: macos-latest,    py: "3.11", asset: macos-arm64, ext: ""     }
 
     env:
       # Windows runner 的控制台编码是 cp1252/cp936。冒烟步骤要打印产物的
