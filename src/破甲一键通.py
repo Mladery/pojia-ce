@@ -671,18 +671,28 @@ def detect_nl(text):
     return "\r\n" if "\r\n" in text[:400] else "\n"
 
 
+def _sha1(data=b""):
+    """本项目所有 sha1 的唯一入口。
+
+    sha1 在这里只用来算文件名和「这份补丁是不是本版打的」的短戳，不是密码学用途；
+    标上 `usedforsecurity=False`，bandit 的 B324 就不再把它当安全问题报。
+    但 `usedforsecurity` 是 Python 3.9 才有的关键字 —— 3.8 上直接 TypeError
+    （CI 的 3.8 任务就挂在这条），所以降级重试一次。
+    """
+    try:
+        return hashlib.sha1(data, usedforsecurity=False)   # nosec B324 - 非密码学用途
+    except TypeError:                                      # Python < 3.9
+        return hashlib.sha1(data)                          # nosec B324 - 同上
+
+
 def sha1_short(s):
     """人格版本标记用的**短哈希**（只用来判断"这份补丁是不是本版打的"）。
 
     ⚠ 这不是密码学用途：公式 `sha1(user|POLICY|OVERLAY|False)` 刻意与上一代
       WorkBuddy v4 逐字一致，好让老机器上已打好的补丁被认成"已是最新"，不白重写
-      600KB 的 product.json。bandit 的 B324 建议显式标注 `usedforsecurity=False`
-      —— 标了它就不再当安全问题报。
+      600KB 的 product.json。
     """
-    try:
-        return hashlib.sha1(s.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
-    except TypeError:                       # Python < 3.9 没有这个参数
-        return hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]  # nosec B324 - 见上方说明
+    return _sha1(s.encode("utf-8")).hexdigest()[:12]
 
 
 def sha256_str(s):
@@ -895,8 +905,7 @@ def vault_dir(root):
 
 
 def _vault_key(path):
-    return hashlib.sha1(os.path.normcase(os.path.abspath(path)).encode("utf-8"),
-                        usedforsecurity=False).hexdigest()[:20]
+    return _sha1(os.path.normcase(os.path.abspath(path)).encode("utf-8")).hexdigest()[:20]
 
 
 def vault_put(root, path, data=None):
@@ -3111,8 +3120,7 @@ class DshTarget:
         # 跟界面自述的"未改动任何文件"自相矛盾。
         if not DRY_RUN:
             os.makedirs(root, exist_ok=True)
-        digest = hashlib.sha1(os.path.normpath(fp).encode("utf-8"),
-                              usedforsecurity=False).hexdigest()[:20]
+        digest = _sha1(os.path.normpath(fp).encode("utf-8")).hexdigest()[:20]
         return os.path.join(root, "%s.%s.bak" % (os.path.basename(fp), digest))
 
     # ---------------- 补丁函数 ----------------
@@ -5846,8 +5854,7 @@ def snapshot_repair(root, key, note, extra=()):
     """
     if not root:
         return ""
-    rnd = hashlib.sha1(("%s|%s|%s" % (time.time(), root, key)).encode("utf-8"),
-                       usedforsecurity=False).hexdigest()[:12]
+    rnd = _sha1(("%s|%s|%s" % (time.time(), root, key)).encode("utf-8")).hexdigest()[:12]
     d = os.path.join(avatar_dir_for(root), "history", "reference-" + rnd)
     try:
         os.makedirs(d, exist_ok=True)
@@ -5924,7 +5931,7 @@ def persona_stale(root, want_hash):
 # 不误报。
 def file_sha16(fp):
     try:
-        h = hashlib.sha1(usedforsecurity=False)  # 补丁戳比对用，非密码学
+        h = _sha1()  # 补丁戳比对用，非密码学
         with open(fp, "rb") as fh:
             for chunk in iter(lambda: fh.read(65536), b""):
                 h.update(chunk)

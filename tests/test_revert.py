@@ -4,6 +4,7 @@
 "补丁还原了、盘上还留着我们动过的东西"就是用户报的"还原不彻底"。这里逐项钉住：
 解包目录、自建备份、专属目录、保险丝，以及旁路备份丢了之后的兜底。
 """
+import hashlib
 import os
 import shutil
 
@@ -92,6 +93,32 @@ def test_vault_roundtrip(core, layout):
     assert out and os.path.isfile(out)
     assert core.vault_get(home, fp) == b"original"
     assert core.vault_count(home) == 1
+
+
+def test_sha1_survives_python38(core, layout, monkeypatch):
+    """Python 3.8 的 hashlib.sha1 不认 usedforsecurity 关键字，不能因此静默失效。
+
+    这条是真踩过的：`_vault_key` 直接把关键字传下去，3.8 上抛 TypeError，被
+    `vault_put` 的 `except Exception` 吞掉 → 返回 ""，保险库里空空如也，还原时
+    取不到原档，一路静默降级成 nobak。CI 的 3.8 任务就是这么红的。
+    """
+    _root, _res, _base, home, _prof = layout
+    real = hashlib.sha1
+
+    def fake(data=b"", **kw):
+        if kw:                                   # 模拟 3.8：只吃一个位置参数
+            raise TypeError("openssl_sha1() takes at most 1 argument (2 given)")
+        return real(data)
+
+    monkeypatch.setattr(hashlib, "sha1", fake)
+    assert len(core._sha1(b"x").hexdigest()) == 40
+
+    fp = os.path.join(home, "t.js")
+    with open(fp, "wb") as f:
+        f.write(b"original")
+    assert core.vault_put(home, fp), "3.8 上保险库不能静默失效"
+    assert core.vault_get(home, fp) == b"original"
+    assert core.file_sha16(fp)
 
 
 def test_revert_uses_vault_when_backup_missing(core, layout):
