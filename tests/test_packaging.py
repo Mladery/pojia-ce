@@ -103,6 +103,59 @@ def test_build_cmd_frozen_uses_self(gui, monkeypatch):
     assert gui.build_cmd("check", []) == ["/opt/pojia-ce", "--check"]
 
 
+# --------------------------------------------------------------- 界面选项
+
+def test_build_cmd_passes_dsh_options(gui, monkeypatch):
+    """DSH 的两个可选项要真的落到命令行上 —— 界面上选了不生效是最坏的一种。"""
+    monkeypatch.setattr(gui, "IS_WIN", True)
+    cmd = gui.build_cmd("apply", ["dsh"], "preset", True)
+    assert "--dsh-mode" in cmd and cmd[cmd.index("--dsh-mode") + 1] == "preset"
+    assert "--git-bash" in cmd
+    assert "--apply" in cmd and "--yes" in cmd
+
+
+def test_build_cmd_omits_dsh_options_without_dsh(gui, monkeypatch):
+    """没勾 DSH 就别传 —— 传了核心会照收，但那是噪声，也容易让人以为生效了。"""
+    monkeypatch.setattr(gui, "IS_WIN", True)
+    cmd = gui.build_cmd("apply", ["wb", "cursor"], "preset", True)
+    assert "--dsh-mode" not in cmd and "--git-bash" not in cmd
+
+
+def test_build_cmd_omits_dsh_options_on_revert(gui, monkeypatch):
+    """还原走备份，跟这两个开关无关；预演要传（核心在 dry-run 分支只探测不下载）。"""
+    monkeypatch.setattr(gui, "IS_WIN", True)
+    assert "--dsh-mode" not in gui.build_cmd("revert", ["dsh"], "preset", True)
+    assert "--git-bash" in gui.build_cmd("dryrun", ["dsh"], "inject", True)
+
+
+def test_build_cmd_git_bash_is_windows_only(gui, monkeypatch):
+    """非 Windows 上核心没有 Git Bash 那条路，别把开关传过去。"""
+    monkeypatch.setattr(gui, "IS_WIN", False)
+    cmd = gui.build_cmd("apply", ["dsh"], "preset", True)
+    assert "--git-bash" not in cmd
+    assert cmd[cmd.index("--dsh-mode") + 1] == "preset"
+
+
+def test_pick_options_whitelists_mode(gui):
+    """接口不假设调用方是自己那页：模式必须落在白名单里，开关一律布尔化。"""
+    assert gui.pick_options({"dsh_mode": "preset", "git_bash": 1}) == ("preset", True)
+    assert gui.pick_options({"dsh_mode": "preset", "git_bash": 0}) == ("preset", False)
+    assert gui.pick_options({"dsh_mode": "../etc/passwd"}) == ("inject", False)
+    assert gui.pick_options({}) == ("inject", False)
+    assert gui.pick_options(None) == ("inject", False)
+
+
+def test_render_page_fills_every_placeholder(gui):
+    """占位符漏一个，页面上就会直接显示 `__TOKEN__` 这种东西（或者更糟：没 token）。"""
+    page = gui.render_page()
+    for left in ("__VERSION__", "__TOKEN__", "__TARGETS__", "__ACTIONS__",
+                 "__ISWIN__", "__REPO__", "__REPO_NAME__"):
+        assert left not in page, "占位符没替换：%s" % left
+    assert gui.TOKEN in page
+    assert gui.REPO_URL in page
+    assert gui.REPO_NAME in page
+
+
 def test_core_version_frozen_asks_self(gui, monkeypatch):
     """冻结态读不到源码，改问 `exe --version`。"""
     monkeypatch.setattr(gui, "FROZEN", True)
@@ -212,7 +265,7 @@ def test_gui_main_opens_browser_unless_told_not_to(gui, monkeypatch):
     monkeypatch.setattr(gui.sys, "argv", ["pojia-ce.exe"])
     monkeypatch.delenv("POJIA_GUI_NO_OPEN", raising=False)
     monkeypatch.setattr(gui, "FROZEN", True)
-    monkeypatch.setattr(gui, "core_version", lambda: "8.52-CE")
+    monkeypatch.setattr(gui, "core_version", lambda: "8.53-CE")
 
     assert gui.main() == 0
     assert len(timers) == 1

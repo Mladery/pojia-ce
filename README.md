@@ -3,7 +3,7 @@
 [![CI](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml)
 [![Build](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml)
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.52-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.53-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。
 > MIT 协议，**非官方**，与原作者无隶属关系；本项目按自己的节奏演进，不跟随上游成品。
 
@@ -109,6 +109,7 @@ pojia-ce.exe --menu                          # 打包版：走命令行交互菜
 
 | 版本 | 主题 |
 |---|---|
+| [`v8.53-CE`](CHANGELOG.md#v853-ce-2026-11-01) | 界面重做（面向普通用户） / DSH 破甲方式可选 / Git Bash 开关进界面 |
 | [`v8.52-CE`](CHANGELOG.md#v852-ce-2026-11-01) | 打包版带 GUI / Cython 预编译 / 构建收进 `tools/` / 许可归属 |
 | [`v8.51-CE`](CHANGELOG.md#v851-ce-2026-11-01) | Git Bash 接管 / DSH 破甲模式 / 运行时守卫 / 还原彻底化 |
 | [`v8.5-CE`](CHANGELOG.md#v85-ce-2026-11-01) | 自动化测试与 CI / 四平台可执行文件 / Windows 代码签名 |
@@ -162,8 +163,8 @@ pojia-ce.exe --menu                          # 打包版：走命令行交互菜
 ## 六、校验
 
 ```
-be056752f8d5a0cdb437522e17f27fc3515e2852d54a78d421111e7080e9174c  src/破甲一键通.py           (477,621 B / LF)
-e380390e03a0eee1b4a68e8f9bbee055c613ff01b14b153b0fe4d59a974040be  src/破甲GUI.py              (26,642 B / LF)
+07f6134a33bfe87c489c23f4ec01ebbc4f9f53b0cd5e5129fd8b4d27aec7202a  src/破甲一键通.py           (477,621 B / LF)
+d7d8fa025a71da75340bb49efa334962f50014fc5b1a6fa0aa013fbbdb252847  src/破甲GUI.py              (46,140 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
 
@@ -176,7 +177,7 @@ git show 536ece2:破甲一键通.py | sha256sum
 
 `src/破甲一键通.py` 现在比 `upstream/` 大 126,228 B —— §四 的「只删不加」说的是摘封条那一步（净减）；多出来的字节来自 v8.2 之后的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、破甲模式、守卫、Git Bash 接管、打包适配），逐条见 [CHANGELOG](CHANGELOG.md)。
 
-版本号分两段存：`VERSION = "8.52"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.52-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
+版本号分两段存：`VERSION = "8.53"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.53-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
 ### 产物校验（两条独立通道）
 

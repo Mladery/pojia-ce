@@ -53,6 +53,9 @@ else:
     CORE = os.path.join(HERE, "破甲一键通.py")
 IS_WIN = (os.name == "nt")
 TOKEN = secrets.token_urlsafe(18)
+# 界面页脚挂仓库地址：用户遇到问题能直接找到源码、更新日志和 issue 入口。
+REPO_NAME = "Mladery/pojia-ce"
+REPO_URL = "https://github.com/" + REPO_NAME
 _VER_CACHE = []
 
 
@@ -127,23 +130,50 @@ TARGETS = [
     ("kiro", "Kiro"),
 ]
 
+# 界面上的文案按「不懂命令行的人也能读」来写：名字说做什么，描述说影响范围。
+# 第三列是 kind，write 的会先弹确认框。
 ACTIONS = [
-    ("status", "检测状态", "只读，不改任何文件", "read"),
-    ("diagnose", "诊断详情", "逐文件列出补丁与备份状态", "read"),
-    ("check", "体检", "磁盘态 / 凭证 / 自证就绪", "read"),
-    ("dryrun", "预演", "只显示会改什么，不落盘", "read"),
-    ("apply", "破甲", "按选中目标执行修改", "write"),
-    ("revert", "还原", "从备份还原成官方原版", "write"),
-    ("snapshot", "生成快照", "WorkBuddy 提示词基准", "read"),
-    ("compare", "对比快照", "与最新基准比对", "read"),
+    ("status", "检测状态", "看看每个软件现在是什么状态（只看不改）", "read"),
+    ("diagnose", "诊断详情", "逐个文件列出补丁与备份状态", "read"),
+    ("check", "体检", "磁盘 / 凭证 / 自证就绪度", "read"),
+    ("dryrun", "先预演", "只列出会改哪些文件，不动手", "read"),
+    ("apply", "一键破甲", "按选中的软件执行修改", "write"),
+    ("revert", "还原成原版", "改错了点这里，按备份恢复", "write"),
+    ("snapshot", "生成快照", "把当前提示词存一份基准", "read"),
+    ("compare", "对比快照", "看提示词有没有被改过", "read"),
 ]
 
+DSH_MODES = ("inject", "preset")
 
-def build_cmd(action, targets):
+
+def pick_options(payload):
+    """把页面传来的两个可选项收口：白名单 + 布尔化。
+
+    页面是本地生成的 HTML，但接口不该假设调用方一定是自己那页（用户能在浏览器
+    里改 JS，别的本机程序也可能拿到 token）。收口放在这里，`do_POST` 只负责转发。
+    """
+    if not isinstance(payload, dict):
+        return "inject", False
+    mode = payload.get("dsh_mode")
+    return (mode if mode in DSH_MODES else "inject"), bool(payload.get("git_bash"))
+
+
+def build_cmd(action, targets, dsh_mode="inject", git_bash=False):
     # 源码态：`python -u 核心.py …`，-u 让输出不攒缓冲，页面才像在实时跑。
     # 打包态：exe 自己就是核心，直接拿自己当命令行 —— 包里没有 .py 可喂给解释器。
     base = [sys.executable] if FROZEN else [sys.executable, "-u", CORE]
     t = ",".join(targets) if targets else "all"
+
+    # DSH 的两个可选项只在「预演 / 破甲」上有意义：还原走的是备份，与它们无关。
+    # 预演也传 --git-bash 是安全的 —— 核心在 dry-run 分支只探测、不下载（见
+    # ensure_git_bash 只在 apply 分支被调用），这样预演能如实报出会接管哪份 Git。
+    extra = []
+    if action in ("dryrun", "apply") and (not targets or "dsh" in targets):
+        m = (dsh_mode or "inject").strip().lower()
+        extra += ["--dsh-mode", m if m in DSH_MODES else "inject"]
+        if IS_WIN and git_bash:
+            extra += ["--git-bash"]
+
     if action == "status":
         return base + ["--status", "--target", t]
     if action == "diagnose":
@@ -151,9 +181,9 @@ def build_cmd(action, targets):
     if action == "check":
         return base + ["--check"]
     if action == "dryrun":
-        return base + ["--dry-run", "--apply", "--target", t]
+        return base + ["--dry-run", "--apply", "--target", t] + extra
     if action == "apply":
-        return base + ["--apply", "--yes", "--target", t]
+        return base + ["--apply", "--yes", "--target", t] + extra
     if action == "revert":
         return base + ["--revert", "--yes", "--target", t]
     if action == "snapshot":
@@ -170,268 +200,504 @@ PAGE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>破甲一键通 · 社区版</title>
 <style>
+  /* 纸墨：暖纸底 + 墨色字 + 一个靛青强调色。
+     圆角三档：容器 12 / 控件 8 / 胶囊 999。
+     强调色只有一个（靛青），朱红只用于「会改文件」的语义，翠绿只用于「一切正常」。 */
   :root{
-    --bg:#f7f8fb;
-    --card:#ffffff;
-    --line:#e9ecf2;
-    --line-strong:#dbe1ea;
-    --ink:#12151c;
-    --ink-2:#5a6473;
-    --ink-3:#8b94a3;
-    --blue:#2563eb;
-    --blue-deep:#1d4ed8;
-    --blue-tint:#eff4ff;
-    --blue-line:#c3d7ff;
-    --danger:#d0453f;
-    --ok:#2f855a;
-    --radius:16px;
-    --shadow:0 1px 2px rgba(16,24,40,.04), 0 14px 34px -18px rgba(16,24,40,.20);
+    --paper:#f4f1e9;
+    --surface:#fdfcf8;
+    --surface-2:#efebe1;
+    --ink:#1c1a16;
+    --ink-2:#5a5346;
+    --ink-3:#786f60;
+    --line:#e2dbcc;
+    --line-2:#cec5b1;
+    --accent:#2b3f6b;
+    --accent-2:#1d2c4d;
+    --accent-soft:#e7eaf2;
+    --danger:#a92a1d;
+    --danger-soft:#f6e8e4;
+    --ok:#2f6b4f;
+    --ok-soft:#e6efe8;
+    --console-bg:#1a1813;
+    --console-ink:#e5ddce;
+    --console-dim:#7d7566;
+    --r:12px; --r-sm:8px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --paper:#131210;
+      --surface:#1a1815;
+      --surface-2:#221f1a;
+      --ink:#efe9dc;
+      --ink-2:#b3aa99;
+      --ink-3:#9a9182;
+      --line:#2d2922;
+      --line-2:#3c362d;
+      --accent:#a7bade;
+      --accent-2:#c2d0ee;
+      --accent-soft:#232a3a;
+      --danger:#e08a7c;
+      --danger-soft:#2e211d;
+      --ok:#74c39b;
+      --ok-soft:#1c2a23;
+      --console-bg:#100f0c;
+      --console-ink:#ded6c6;
+      --console-dim:#6f6859;
+    }
   }
   *{box-sizing:border-box}
-  html,body{height:100%}
+  html,body{margin:0; min-height:100%}
   body{
-    margin:0; color:var(--ink);
-    background:
-      radial-gradient(1100px 380px at 50% -12%, #e9f0ff 0%, rgba(233,240,255,0) 62%),
-      var(--bg);
-    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI Variable","Segoe UI",
+    background:var(--paper); color:var(--ink);
+    font:14px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",
          "PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
-    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+    -webkit-font-smoothing:antialiased;
   }
-  header{
-    position:sticky; top:0; z-index:20;
-    display:flex; align-items:center; gap:14px;
-    padding:16px 32px;
-    background:rgba(255,255,255,.74);
-    backdrop-filter:saturate(180%) blur(14px);
-    border-bottom:1px solid var(--line);
+  .mono{font-family:ui-monospace,SFMono-Regular,"Cascadia Mono",Menlo,Consolas,monospace;
+        font-variant-numeric:tabular-nums}
+  .shell{max-width:1080px; margin:0 auto; padding:20px 24px 28px}
+
+  /* ── 顶栏 ───────────────────────────────────────────── */
+  .topbar{
+    display:flex; align-items:center; gap:12px;
+    padding:0 2px 13px; border-bottom:1px solid var(--line);
   }
-  .mark{
-    width:22px; height:22px; border-radius:7px; flex:none;
-    background:linear-gradient(145deg,#3b82f6 0%,#1d4ed8 100%);
-    box-shadow:0 2px 6px -1px rgba(37,99,235,.45), inset 0 1px 0 rgba(255,255,255,.35);
-    position:relative;
+  .seal{width:20px; height:20px; flex:none; border-radius:4px; background:var(--accent); position:relative}
+  .seal::after{
+    content:""; position:absolute; inset:6px 5px; border-radius:1px;
+    background:var(--surface); clip-path:polygon(0 0,100% 38%,0 76%);
   }
-  .mark::after{
-    content:""; position:absolute; inset:6px;
-    border-radius:2px; background:rgba(255,255,255,.92);
-    clip-path:polygon(0 0,100% 50%,0 100%,35% 50%);
-  }
-  .brand{display:flex; align-items:center; gap:11px}
-  .brand h1{font-size:14.5px; font-weight:640; letter-spacing:.01em; margin:0}
-  .brand .ver{font-size:11.5px; color:var(--ink-3); letter-spacing:.02em}
-  .spacer{flex:1}
-  .pill{
+  .brand{display:flex; align-items:baseline; gap:9px; min-width:0}
+  .brand b{font-size:15px; font-weight:640; letter-spacing:-.01em}
+  .brand .tag{font-size:11px; color:var(--ink-3); letter-spacing:.06em;
+              border-left:1px solid var(--line-2); padding-left:9px}
+  .brand .ver{font-size:11.5px; color:var(--ink-3)}
+  .grow{flex:1}
+  .state{
     display:inline-flex; align-items:center; gap:7px;
-    padding:5px 12px; border-radius:999px;
-    border:1px solid var(--line-strong); background:#fff;
-    font-size:12px; color:var(--ink-2); letter-spacing:.01em;
+    padding:4px 11px 4px 9px; border-radius:999px;
+    border:1px solid var(--line-2); background:var(--surface);
+    font-size:12px; color:var(--ink-2); white-space:nowrap;
+    transition:border-color .15s ease, color .15s ease, background .15s ease;
   }
-  .pill .dot{width:6px; height:6px; border-radius:50%; background:var(--ok)}
-  .pill.busy{border-color:var(--blue-line); color:var(--blue-deep); background:var(--blue-tint)}
-  .pill.busy .dot{background:var(--blue); animation:pulse 1.1s ease-in-out infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.28}}
+  .state i{width:6px; height:6px; border-radius:50%; background:var(--ok); flex:none}
+  .state.busy{border-color:var(--accent); color:var(--accent); background:var(--accent-soft)}
+  .state.busy i{background:var(--accent); animation:blip 1.05s ease-in-out infinite}
+  .state.bad{border-color:var(--danger); color:var(--danger); background:var(--danger-soft)}
+  .state.bad i{background:var(--danger)}
+  .state.good{border-color:var(--ok); color:var(--ok); background:var(--ok-soft)}
+  @keyframes blip{0%,100%{opacity:1}50%{opacity:.25}}
 
-  main{
-    max-width:1180px; margin:0 auto; padding:26px 32px 36px;
-    display:grid; grid-template-columns:minmax(320px,360px) 1fr; gap:18px;
-    align-items:stretch;
+  /* ── 顶部引导 ───────────────────────────────────────── */
+  .hero{padding:26px 2px 6px}
+  .hero h1{
+    margin:0 0 7px; font-size:23px; line-height:1.3; font-weight:640;
+    letter-spacing:-.02em; text-wrap:balance;
   }
-  @media (max-width:900px){ main{grid-template-columns:1fr} }
+  .hero .lede{
+    margin:0 0 18px; max-width:60ch;
+    font-size:13.5px; line-height:1.7; color:var(--ink-2);
+  }
+  .cta{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+  .hint{
+    margin:10px 0 0; font-size:12px; color:var(--ink-3);
+    display:flex; align-items:center; gap:6px;
+  }
+  .hint b{font-weight:560; color:var(--ink-2)}
 
-  .card{
-    background:var(--card); border:1px solid var(--line);
-    border-radius:var(--radius); box-shadow:var(--shadow);
-    overflow:hidden;
+  /* ── 按钮 ───────────────────────────────────────────── */
+  .btn{
+    padding:8px 15px; border-radius:var(--r-sm); cursor:pointer;
+    border:1px solid var(--line-2); background:var(--surface);
+    font:inherit; font-size:13px; color:var(--ink);
+    transition:background .12s ease, border-color .12s ease, opacity .12s ease;
   }
-  .card-head{
-    display:flex; align-items:center; gap:9px;
-    padding:15px 18px 11px;
+  .btn:hover{background:var(--surface-2)}
+  .btn:disabled{opacity:.45; cursor:not-allowed}
+  .btn:disabled:hover{background:var(--surface)}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fbf9f4}
+  .btn.primary:hover{background:var(--accent-2); border-color:var(--accent-2)}
+  .btn.primary:disabled:hover{background:var(--accent)}
+  .btn.danger{background:var(--danger); border-color:var(--danger); color:#fbf9f4}
+  .btn.danger:hover{filter:brightness(1.07)}
+  .btn.lg{
+    padding:11px 22px; font-size:14px; font-weight:560; letter-spacing:.01em;
+    border-radius:var(--r-sm);
+    box-shadow:0 1px 2px rgba(28,26,22,.12);
   }
-  .card-head h2{
-    margin:0; font-size:11px; font-weight:650; letter-spacing:.1em;
-    text-transform:uppercase; color:var(--ink-3);
+  @media (prefers-color-scheme: dark){
+    .btn.primary,.btn.danger{color:#131210}
   }
-  .card-head .tick{width:4px; height:4px; border-radius:50%; background:var(--blue); flex:none}
-  .card-head .meta{
-    margin-left:auto; font-size:11.5px; color:var(--ink-3);
-    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-    letter-spacing:.02em;
-  }
-  .card-body{padding:0 16px 16px}
+  :focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 
-  .chips{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px}
-  .chip{
-    display:inline-flex; align-items:center; gap:8px;
-    padding:8px 12px 8px 10px; border-radius:10px; cursor:pointer;
-    border:1px solid var(--line-strong); background:#fff;
-    font-size:12.5px; color:var(--ink-2); min-width:0;
-    transition:border-color .15s ease, background .15s ease, color .15s ease;
-    user-select:none;
+  /* ── 帮助折叠 ───────────────────────────────────────── */
+  .help{
+    margin:14px 0 0; border:1px solid var(--line); border-radius:var(--r);
+    background:var(--surface); overflow:hidden;
   }
-  .chip:hover{border-color:#c8d0dc; color:var(--ink)}
-  .chip .mark2{
-    width:6px; height:6px; border-radius:50%; flex:none;
-    border:1.5px solid #cfd6e0; background:transparent;
-    transition:all .15s ease;
+  .help > summary{
+    cursor:pointer; padding:11px 15px; font-size:12.5px; color:var(--ink-2);
+    list-style:none; display:flex; align-items:center; gap:8px;
   }
-  .chip[aria-pressed="true"]{
-    background:var(--blue-tint); border-color:var(--blue-line); color:var(--blue-deep);
+  .help > summary::-webkit-details-marker{display:none}
+  .help > summary::before{
+    content:""; width:5px; height:5px; flex:none; border-right:1.5px solid var(--ink-3);
+    border-bottom:1.5px solid var(--ink-3); transform:rotate(-45deg); transition:transform .15s ease;
   }
-  .chip[aria-pressed="true"] .mark2{background:var(--blue); border-color:var(--blue)}
-  .chip .lbl{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-  .chip-tools{display:flex; gap:14px; margin-top:13px; font-size:12.5px}
-  .linkbtn{
-    background:none; border:0; padding:0; cursor:pointer;
-    color:var(--ink-3); font:inherit;
-    transition:color .13s ease;
-  }
-  .linkbtn:hover{color:var(--blue-deep)}
+  .help[open] > summary::before{transform:rotate(45deg)}
+  .help > summary:hover{color:var(--ink)}
+  .help .body{padding:0 15px 15px; display:grid; gap:11px}
+  .help .q{font-size:12.5px; font-weight:560; margin:0 0 2px}
+  .help .a{margin:0; font-size:12.5px; line-height:1.7; color:var(--ink-2)}
 
-  .acts{display:grid; gap:1px}
+  /* ── 主栅格 ─────────────────────────────────────────── */
+  .grid{
+    display:grid; grid-template-columns:296px minmax(0,1fr); gap:0;
+    margin-top:16px; border:1px solid var(--line); border-radius:var(--r);
+    background:var(--surface); overflow:hidden;
+  }
+  @media (max-width:860px){ .grid{grid-template-columns:1fr} }
+  /* 两列都是 flex 列：DSH 那块收起来后右列会变短，让摘要钉在底部，
+     空出来的地方读作留白，而不是「下面漏了什么」。 */
+  .col{min-width:0; display:flex; flex-direction:column}
+  .col + .col{border-left:1px solid var(--line)}
+  @media (max-width:860px){ .col + .col{border-left:0; border-top:1px solid var(--line)} }
+
+  .head{
+    display:flex; align-items:center; gap:10px;
+    padding:12px 16px 10px; border-bottom:1px solid var(--line);
+    background:var(--surface-2);
+  }
+  .head h2{margin:0; font-size:11.5px; font-weight:640; letter-spacing:.08em; color:var(--ink-2)}
+  .head .aside{margin-left:auto; font-size:11.5px; color:var(--ink-3)}
+
+  /* ── 软件清单 ───────────────────────────────────────── */
+  /* 不做内滚动：17 项一屏放得下，整页滚比嵌套滚动直观 —— 小白看到列表被切掉一半
+     会以为「就这些」，然后漏勾。窄屏靠整页滚动兜住。 */
+  .list{padding:5px 0}
+  .row{
+    display:flex; align-items:center; gap:10px; width:100%;
+    padding:7px 16px; border:0; background:none; cursor:pointer;
+    font:inherit; color:var(--ink); text-align:left;
+  }
+  .row:hover{background:var(--surface-2)}
+  .box{
+    width:13px; height:13px; flex:none; border-radius:3px;
+    border:1.5px solid var(--line-2); background:transparent;
+    position:relative; transition:background .12s ease, border-color .12s ease;
+  }
+  .row[aria-pressed="true"] .box{background:var(--accent); border-color:var(--accent)}
+  .row[aria-pressed="true"] .box::after{
+    content:""; position:absolute; left:3.5px; top:1px; width:4px; height:7px;
+    border-right:1.8px solid var(--surface); border-bottom:1.8px solid var(--surface);
+    transform:rotate(40deg);
+  }
+  .row .lbl{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px}
+  .row[aria-pressed="true"] .lbl{font-weight:560}
+  .row .badge{
+    font-size:10.5px; letter-spacing:.04em; color:var(--accent);
+    border:1px solid var(--accent); border-radius:999px; padding:0 6px; flex:none;
+  }
+  .foot{
+    display:flex; align-items:center; gap:16px; margin-top:auto;
+    padding:10px 16px; border-top:1px solid var(--line); background:var(--surface-2);
+  }
+  .foot .tip{margin-left:auto; font-size:11.5px; color:var(--ink-3)}
+  .link{
+    background:none; border:0; padding:0; cursor:pointer; font:inherit;
+    font-size:12.5px; color:var(--ink-2); transition:color .12s ease;
+  }
+  .link:hover{color:var(--accent)}
+
+  /* ── DSH 选项 ───────────────────────────────────────── */
+  .opts{padding:13px 16px 15px; border-bottom:1px solid var(--line)}
+  .choice{
+    display:flex; gap:11px; padding:11px 13px; cursor:pointer;
+    border:1px solid var(--line); border-radius:var(--r-sm); background:var(--surface);
+    transition:border-color .12s ease, background .12s ease;
+  }
+  .choice + .choice{margin-top:8px}
+  .choice:hover{border-color:var(--line-2); background:var(--surface-2)}
+  .choice.on{border-color:var(--accent); background:var(--accent-soft)}
+  .choice input{
+    appearance:none; -webkit-appearance:none; margin:3px 0 0;
+    width:14px; height:14px; flex:none; border-radius:50%; cursor:pointer;
+    border:1.5px solid var(--line-2); background:transparent;
+    transition:border-color .12s ease, background .12s ease, box-shadow .12s ease;
+  }
+  .choice input:checked{border-color:var(--accent); background:var(--accent);
+    box-shadow:inset 0 0 0 3px var(--surface)}
+  .choice .ct{font-size:13px; font-weight:560; display:flex; align-items:center; gap:7px}
+  .choice .ct .tag{
+    font-size:10.5px; font-weight:400; letter-spacing:.04em;
+    color:var(--ink-3); border:1px solid var(--line-2); border-radius:999px; padding:0 6px;
+  }
+  .choice .cd{margin:2px 0 0; font-size:12px; line-height:1.62; color:var(--ink-2)}
+  .choice.on .cd{color:var(--ink-2)}
+
+  .switchrow{
+    display:flex; align-items:flex-start; gap:11px;
+    margin-top:14px; padding-top:13px; border-top:1px dashed var(--line-2);
+    cursor:pointer;
+  }
+  .switchrow input{position:absolute; opacity:0; width:0; height:0}
+  .track{
+    width:34px; height:19px; flex:none; margin-top:2px; border-radius:999px;
+    background:var(--line-2); position:relative; transition:background .14s ease;
+  }
+  .track::after{
+    content:""; position:absolute; top:2px; left:2px; width:15px; height:15px;
+    border-radius:50%; background:var(--surface); transition:transform .14s ease;
+  }
+  .switchrow input:checked + .track{background:var(--accent)}
+  .switchrow input:checked + .track::after{transform:translateX(15px)}
+  .switchrow input:focus-visible + .track{outline:2px solid var(--accent); outline-offset:2px}
+  .switchrow .txt{font-size:12.5px; line-height:1.62}
+  .switchrow .txt b{font-weight:560}
+  .switchrow .txt span{display:block; color:var(--ink-2); font-size:12px}
+
+  /* ── 其他操作 ───────────────────────────────────────── */
+  .acts{padding:5px 0 6px}
   .act{
-    display:flex; align-items:center; gap:14px; width:100%;
-    padding:12px 12px; border:0; border-radius:10px; cursor:pointer;
-    background:none; text-align:left; font:inherit; color:inherit;
-    transition:background .13s ease, color .13s ease;
+    display:flex; align-items:baseline; gap:12px; width:100%;
+    padding:9px 16px; border:0; background:none; cursor:pointer;
+    font:inherit; color:var(--ink); text-align:left;
+    transition:background .12s ease;
   }
-  .act:hover{background:var(--blue-tint)}
-  .act:hover .name{color:var(--blue-deep)}
-  .act:hover .arrow{color:var(--blue); transform:translateX(2px)}
-  .act:active{background:#e6eeff}
-  .act[disabled]{opacity:.45; cursor:not-allowed}
-  .act .name{font-weight:560; min-width:84px; transition:color .13s ease}
-  .act .desc{color:var(--ink-3); font-size:12.5px}
-  .act .arrow{
-    margin-left:auto; color:#cfd6e0; font-size:15px;
-    transition:transform .15s ease, color .15s ease;
-  }
-  .act.danger .name{color:var(--danger)}
-  .act.danger:hover{background:#fdf1f0}
-  .act.danger:hover .name{color:#b93a34}
-  .act.danger:hover .arrow{color:#b93a34}
+  .act:hover{background:var(--surface-2)}
+  .act .n{font-size:13px; font-weight:560; min-width:84px}
+  .act .d{flex:1; font-size:12px; color:var(--ink-3)}
+  .act .go{font-size:13px; color:var(--line-2); transition:color .12s ease, transform .12s ease}
+  .act:hover .go{color:var(--accent); transform:translateX(2px)}
+  .act[data-kind="write"] .n{color:var(--danger)}
+  .act[data-kind="write"]:hover{background:var(--danger-soft)}
+  .act[disabled]{opacity:.4; cursor:not-allowed}
+  .act[disabled]:hover{background:none}
 
-  .console-card{margin-top:0; grid-column:1 / -1}
-  .console-head{
-    display:flex; align-items:center; gap:10px; padding:13px 18px;
-    border-bottom:1px solid var(--line); background:#fff;
+  .more{border-top:1px solid var(--line)}
+  .more > summary{
+    cursor:pointer; list-style:none; padding:10px 16px;
+    font-size:12.5px; color:var(--ink-3); display:flex; align-items:center; gap:8px;
   }
-  .console-head h2{
-    margin:0; font-size:11px; font-weight:650; letter-spacing:.1em;
-    text-transform:uppercase; color:var(--ink-3);
+  .more > summary::-webkit-details-marker{display:none}
+  .more > summary::before{
+    content:""; width:5px; height:5px; flex:none; border-right:1.5px solid var(--ink-3);
+    border-bottom:1.5px solid var(--ink-3); transform:rotate(-45deg); transition:transform .15s ease;
   }
-  .console-head .live{
-    width:6px; height:6px; border-radius:50%; background:#cfd6e0; flex:none;
-    transition:background .2s ease;
+  .more[open] > summary::before{transform:rotate(45deg)}
+  .more > summary:hover{color:var(--ink-2)}
+
+  /* ── 本次摘要 ───────────────────────────────────────── */
+  /* 右列底部把「点下去会发生什么」提前写出来：既填掉两列的高度差，也让人在按
+     大按钮之前就知道自己选了什么，而不是等确认框弹出来才看。 */
+  .summary{border-top:1px solid var(--line); margin-top:auto}
+  .summary dl{margin:0; padding:10px 16px 14px; display:grid; gap:7px}
+  .summary dl > div{display:flex; gap:12px; align-items:baseline; font-size:12.5px}
+  .summary dt{width:56px; flex:none; color:var(--ink-3)}
+  .summary dd{margin:0; color:var(--ink-2); min-width:0}
+  .summary dd b{font-weight:560; color:var(--ink)}
+  /* 类选择器的 display 会盖掉 UA 的 [hidden]{display:none}，这里补一刀 */
+  [hidden]{display:none !important}
+
+  /* ── 输出 ───────────────────────────────────────────── */
+  .console{
+    margin-top:16px; border:1px solid var(--line); border-radius:var(--r);
+    overflow:hidden; background:var(--console-bg);
   }
-  .console-head.on .live{background:var(--blue); animation:pulse 1.1s ease-in-out infinite}
-  .console-head .meta{
-    font-size:11.5px; color:var(--ink-3);
-    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  }
-  .console-head .spacer{flex:1}
+  .console .head{background:#221f19; border-bottom:1px solid #322d24}
+  .console .head h2{color:#b3aa99}
+  .console .head .aside{color:#7d7566}
+  .console .head .link{color:#b3aa99}
+  .console .head .link:hover{color:#e5ddce}
+  .live{width:6px; height:6px; border-radius:50%; background:#4a4438; flex:none}
+  .console.on .live{background:#8fb79a; animation:blip 1.05s ease-in-out infinite}
   pre#out{
-    margin:0; padding:18px 20px 20px;
-    min-height:190px; max-height:44vh; overflow:auto;
-    background:linear-gradient(180deg,#0d1424 0%,#0b111e 100%);
-    color:#c9d4e7;
-    font:12.5px/1.74 ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
-    white-space:pre-wrap; word-break:break-word;
-    tab-size:2;
+    margin:0; padding:15px 18px 17px;
+    height:clamp(180px,34vh,320px); overflow:auto;
+    background:var(--console-bg); color:var(--console-ink);
+    font:12.5px/1.72 ui-monospace,SFMono-Regular,"Cascadia Mono",Menlo,Consolas,monospace;
+    white-space:pre-wrap; word-break:break-word; tab-size:2;
   }
   pre#out::-webkit-scrollbar{width:10px; height:10px}
-  pre#out::-webkit-scrollbar-thumb{background:#243049; border-radius:6px; border:2px solid #0d1424}
-  pre#out::-webkit-scrollbar-thumb:hover{background:#31405e}
-  pre#out .dim{color:#6b7686}
-  .empty{color:#4d5871}
+  pre#out::-webkit-scrollbar-thumb{background:#332e25; border-radius:6px; border:2px solid var(--console-bg)}
+  pre#out::-webkit-scrollbar-thumb:hover{background:#443d31}
+  .empty{color:var(--console-dim); line-height:1.9}
+  .empty b{color:#b3aa99; font-weight:560}
 
-  .modal{
-    position:fixed; inset:0; display:none; place-items:center;
-    background:rgba(18,21,28,.34); backdrop-filter:blur(4px); z-index:50;
-  }
-  .modal.on{display:grid}
-  .modal .box{
-    width:min(430px,92vw); background:#fff; border-radius:18px;
-    padding:26px; box-shadow:0 30px 70px -24px rgba(16,24,40,.45);
-    animation:pop .16s ease-out;
-  }
-  @keyframes pop{from{transform:translateY(6px) scale(.99); opacity:0}to{transform:none; opacity:1}}
-  .modal h3{margin:0 0 8px; font-size:15.5px; letter-spacing:.01em}
-  .modal p{margin:0 0 22px; color:var(--ink-2); font-size:13.5px}
-  .modal .row{display:flex; gap:9px; justify-content:flex-end}
-  .btn{
-    padding:9px 17px; border-radius:10px; border:1px solid var(--line-strong);
-    background:#fff; font:inherit; font-size:13px; cursor:pointer; color:var(--ink);
-    transition:all .13s ease;
-  }
-  .btn:hover{background:#f4f6fa; border-color:#c8d0dc}
-  .btn.primary{
-    background:linear-gradient(180deg,#3b82f6,#2563eb);
-    border-color:#2563eb; color:#fff;
-    box-shadow:0 1px 2px rgba(37,99,235,.35), inset 0 1px 0 rgba(255,255,255,.18);
-  }
-  .btn.primary:hover{filter:brightness(1.05)}
-  .btn.danger{
-    background:linear-gradient(180deg,#dc5a54,#c9403a);
-    border-color:#c9403a; color:#fff;
-    box-shadow:0 1px 2px rgba(201,64,58,.3), inset 0 1px 0 rgba(255,255,255,.16);
-  }
-  .btn.danger:hover{filter:brightness(1.05)}
   footer{
-    max-width:1180px; margin:0 auto; padding:0 32px 34px;
-    color:var(--ink-3); font-size:12px; letter-spacing:.01em;
+    display:flex; gap:14px; align-items:baseline; flex-wrap:wrap;
+    margin-top:13px; padding:0 2px; font-size:11.5px; color:var(--ink-3);
   }
   footer b{font-weight:560; color:var(--ink-2)}
+  footer .sep{color:var(--line-2)}
+  a.repo{color:var(--ink-2); text-decoration:none; border-bottom:1px solid var(--line-2);
+         transition:color .12s ease, border-color .12s ease}
+  a.repo:hover{color:var(--accent); border-color:var(--accent)}
+  .help a{color:var(--accent); text-decoration:none; border-bottom:1px solid currentColor}
+  .help a:hover{color:var(--accent-2)}
+
+  /* ── 确认框 ─────────────────────────────────────────── */
+  .modal{position:fixed; inset:0; display:none; place-items:center; z-index:50;
+         background:rgba(28,26,22,.4); padding:20px}
+  .modal.on{display:grid}
+  .modal .box{
+    width:min(430px,100%); background:var(--surface);
+    border:1px solid var(--line-2); border-radius:var(--r); padding:22px 22px 18px;
+  }
+  .modal h3{margin:0 0 7px; font-size:15.5px; letter-spacing:-.01em}
+  .modal p{margin:0 0 6px; font-size:13px; color:var(--ink-2); line-height:1.68}
+  .modal .kv{
+    margin:13px 0 18px; padding:10px 12px; border-radius:var(--r-sm);
+    background:var(--surface-2); border:1px solid var(--line);
+    font-size:12px; color:var(--ink-2); line-height:1.95;
+  }
+  .modal .kv span{color:var(--ink-3); display:inline-block; min-width:62px}
+  .modal .row{display:flex; gap:8px; justify-content:flex-end}
+
+  @media (prefers-reduced-motion: reduce){
+    *{animation:none !important; transition:none !important}
+  }
 </style>
 </head>
 <body>
-<header>
-  <div class="brand">
-    <div class="mark"></div>
-    <h1>破甲一键通</h1>
-    <span class="ver">v__VERSION__</span>
-  </div>
-  <div class="spacer"></div>
-  <div class="pill" id="state"><span class="dot"></span><span id="state-text">就绪</span></div>
-</header>
+<div class="shell">
 
-<main>
-  <section class="card">
-    <div class="card-head"><span class="tick"></span><h2>目标</h2><span class="meta" id="count"></span></div>
-    <div class="card-body">
-      <div class="chips" id="chips"></div>
-      <div class="chip-tools">
-        <button class="linkbtn" id="all">全选</button>
-        <button class="linkbtn" id="none">全不选</button>
+  <header class="topbar">
+    <span class="seal" aria-hidden="true"></span>
+    <div class="brand">
+      <b>破甲一键通</b>
+      <span class="tag">社区版</span>
+      <span class="ver mono">v__VERSION__</span>
+    </div>
+    <span class="grow"></span>
+    <span class="state" id="state"><i></i><span id="state-text">待命中</span></span>
+  </header>
+
+  <section class="hero">
+    <h1>解锁 AI 编程工具被藏起来的能力</h1>
+    <p class="lede">勾选你用到的软件，点一下「一键破甲」就行。没装的会自动跳过，改错了随时能还原。</p>
+    <div class="cta">
+      <button type="button" class="btn primary lg" id="go">一键破甲</button>
+      <button type="button" class="btn" id="detect">先检测一下（只看不改）</button>
+    </div>
+    <p class="hint" id="hint"></p>
+  </section>
+
+  <details class="help">
+    <summary>第一次用？三十秒看懂这个工具在做什么</summary>
+    <div class="body">
+      <div>
+        <p class="q">「破甲」是什么</p>
+        <p class="a">这些 AI 编程工具出厂时会把系统提示词收窄、把部分能力关掉。破甲就是把本机上这些被收窄的提示词恢复成完整版，让模型按你原本的意图干活。</p>
+      </div>
+      <div>
+        <p class="q">它会改我电脑上的什么</p>
+        <p class="a">只改这些软件安装目录里的提示词和配置文件，改之前先备份一份。不动系统设置、不动你的代码、不动账号数据。</p>
+      </div>
+      <div>
+        <p class="q">后悔了怎么办</p>
+        <p class="a">右边点「还原成原版」，会按备份逐字节恢复。软件自己升级后设置可能被覆盖，重跑一次就行。</p>
+      </div>
+      <div>
+        <p class="q">源码和更新在哪</p>
+        <p class="a">开源在 <a href="__REPO__" target="_blank" rel="noopener noreferrer">__REPO_NAME__</a>。更新日志、已知问题、反馈入口都在仓库里 —— 用着不对劲可以先翻一眼那里。</p>
       </div>
     </div>
-  </section>
+  </details>
 
-  <section class="card">
-    <div class="card-head"><span class="tick"></span><h2>操作</h2></div>
-    <div class="card-body"><div class="acts" id="acts"></div></div>
-  </section>
-
-  <section class="card console-card">
-    <div class="console-head" id="console-head">
-      <span class="live"></span><h2>输出</h2>
-      <span class="meta" id="elapsed"></span>
-      <div class="spacer"></div>
-      <button class="linkbtn" id="clear">清空</button>
+  <div class="grid">
+    <div class="col">
+      <div class="head"><h2>选软件</h2><span class="aside mono" id="count"></span></div>
+      <div class="list" id="chips"></div>
+      <div class="foot">
+        <button type="button" class="link" id="all">全选</button>
+        <button type="button" class="link" id="none">全不选</button>
+        <span class="tip">没装的会跳过</span>
+      </div>
     </div>
-    <pre id="out"><span class="empty">等待操作…</span></pre>
-  </section>
-</main>
 
-<footer>本地运行，仅绑定 <b>127.0.0.1</b>。破坏性操作需二次确认，所有改动均可用「还原」回退。</footer>
+    <div class="col">
+      <!-- 整块随「是否勾选 DSH」显示/隐藏：没勾就一点痕迹都不留，
+           而不是压暗成一块读不懂的灰区。 -->
+      <div id="dshblock">
+        <div class="head">
+          <h2>DSH 怎么处理</h2>
+          <span class="aside">只影响 DeepSeek Harness</span>
+        </div>
+        <div class="opts" id="opts">
+          <label class="choice on" id="c-inject">
+            <input type="radio" name="mode" value="inject" checked>
+            <span>
+              <span class="ct">改配置文件 <span class="tag">默认</span></span>
+              <span class="cd">直接把 DSH 的人格设定改掉。所有模式都生效，最彻底。</span>
+            </span>
+          </label>
+          <label class="choice" id="c-preset">
+            <input type="radio" name="mode" value="preset">
+            <span>
+              <span class="ct">只加一个模式 <span class="tag">更稳妥</span></span>
+              <span class="cd">不动 DSH 的任何官方文件，只在模式列表里多一项「破甲模式」。你在下拉里选中它才生效，DSH 升级也不会把设置冲掉。</span>
+            </span>
+          </label>
+
+          <label class="switchrow" id="gb-opt">
+            <input type="checkbox" id="gitbash">
+            <span class="track"></span>
+            <span class="txt">
+              <b>让 DSH 改用 Git Bash 执行命令</b>
+              <span>Windows 自带的命令行在引号处理上容易出错，模型常在这儿翻车。打开后程序会自动准备一个便携版 Git Bash —— 不用你安装，也不改系统设置。改完要重启 DSH 才生效。</span>
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <div class="head"><h2>其他操作</h2></div>
+      <div class="acts" id="acts"></div>
+      <details class="more">
+        <summary>更多工具（诊断、预演、快照）</summary>
+        <div class="acts" id="acts2"></div>
+      </details>
+
+      <div class="summary">
+        <div class="head"><h2>这次会做什么</h2></div>
+        <dl>
+          <div><dt>软件</dt><dd id="s-soft"></dd></div>
+          <div id="s-row-mode"><dt>DSH</dt><dd id="s-mode"></dd></div>
+          <div id="s-row-shell"><dt>命令行</dt><dd id="s-shell"></dd></div>
+          <div><dt>反悔</dt><dd>随时点「还原成原版」逐字节恢复</dd></div>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <section class="console" id="console">
+    <div class="head">
+      <span class="live"></span><h2>运行详情</h2>
+      <span class="aside mono" id="elapsed"></span>
+      <span class="grow"></span>
+      <button type="button" class="link" id="clear">清空</button>
+    </div>
+    <pre id="out"><span class="empty">这里会显示每一步在做什么。<b>一键破甲</b>会改文件，<b>先检测一下</b>只看不改 —— 拿不准就先检测。</span></pre>
+  </section>
+
+  <footer>
+    <span>本地运行，只绑定 <b>127.0.0.1</b></span>
+    <span class="sep">/</span>
+    <span>改文件前自动备份，随时可还原</span>
+    <span class="sep">/</span>
+    <a class="repo" href="__REPO__" target="_blank" rel="noopener noreferrer">源码与更新日志：<b>__REPO_NAME__</b></a>
+  </footer>
+</div>
 
 <div class="modal" id="modal">
   <div class="box">
     <h3 id="m-title">确认操作</h3>
     <p id="m-desc"></p>
+    <div class="kv" id="m-kv"></div>
     <div class="row">
-      <button class="btn" id="m-cancel">取消</button>
-      <button class="btn danger" id="m-ok">确认执行</button>
+      <button type="button" class="btn" id="m-cancel">取消</button>
+      <button type="button" class="btn danger" id="m-ok">确认执行</button>
     </div>
   </div>
 </div>
@@ -440,98 +706,160 @@ PAGE = r"""<!DOCTYPE html>
 const TOKEN = "__TOKEN__";
 const TARGETS = __TARGETS__;
 const ACTIONS = __ACTIONS__;
+const IS_WIN = __ISWIN__;
+
 const selected = new Set(TARGETS.map(t => t[0]));
+const opts = {mode: "inject", gitBash: false};
 
-const chipsEl = document.getElementById("chips");
-const actsEl = document.getElementById("acts");
-const outEl = document.getElementById("out");
-const stateEl = document.getElementById("state");
-const stateText = document.getElementById("state-text");
-const countEl = document.getElementById("count");
-const elapsedEl = document.getElementById("elapsed");
-const consoleHead = document.getElementById("console-head");
+const $ = id => document.getElementById(id);
+const chipsEl = $("chips"), actsEl = $("acts"), acts2El = $("acts2"), outEl = $("out");
+const stateEl = $("state"), stateText = $("state-text"), countEl = $("count");
+const elapsedEl = $("elapsed"), consoleEl = $("console"), optsEl = $("opts");
+const goBtn = $("go"), hintEl = $("hint");
 
+/* 软件清单 */
 TARGETS.forEach(([key, label]) => {
   const b = document.createElement("button");
-  b.className = "chip";
+  b.type = "button";
+  b.className = "row";
+  b.dataset.key = key;
   b.setAttribute("aria-pressed", "true");
-  b.innerHTML = `<span class="mark2"></span><span class="lbl">${label}</span>`;
-  b.title = key;
+  b.innerHTML = `<span class="box"></span><span class="lbl">${label}</span>`
+    + (key === "dsh" ? `<span class="badge">有选项</span>` : "");
   b.onclick = () => {
     if (selected.has(key)) selected.delete(key); else selected.add(key);
     b.setAttribute("aria-pressed", selected.has(key));
-    updateCount();
+    sync();
   };
   chipsEl.appendChild(b);
 });
 
-function updateCount(){ countEl.textContent = `${selected.size} / ${TARGETS.length}`; }
-updateCount();
+function sync(){
+  countEl.textContent = `${selected.size}/${TARGETS.length}`;
+  const on = selected.has("dsh");
+  /* 没勾 DSH 就整块收起来 —— 留着压暗的控件只会让人问「为什么点不动」 */
+  $("dshblock").hidden = !on;
+  optsEl.querySelectorAll("input").forEach(el => el.disabled = !on);
 
-document.getElementById("all").onclick = () => {
+  const n = selected.size;
+  if (!n){
+    hintEl.innerHTML = "还没勾选任何软件 —— 先在下面点一个。";
+    goBtn.disabled = true;
+  } else {
+    hintEl.innerHTML = `已选 <b>${n}</b> 个软件 · 没装的会自动跳过 · 改错了随时能还原`;
+    goBtn.disabled = busy;
+  }
+  paintSummary();
+}
+
+/* 右列底部的摘要：把「点下去会发生什么」提前写出来，不用等确认框。
+   没勾 DSH 时那两行直接不显示，和上面整块的隐藏保持一致。 */
+function paintSummary(){
+  const n = selected.size, dsh = selected.has("dsh");
+  $("s-soft").innerHTML = n
+    ? `<b>${n}</b> 个${n === TARGETS.length ? "（全部）" : ""}`
+    : `<b>未选</b> —— 先勾一个`;
+  $("s-row-mode").hidden = !dsh;
+  $("s-mode").textContent = opts.mode === "preset"
+    ? "只加一个模式（不改官方文件）" : "改配置文件（所有模式生效）";
+  $("s-row-shell").hidden = !dsh || !IS_WIN;
+  $("s-shell").textContent = opts.gitBash
+    ? "Git Bash（重启 DSH 后生效）" : "PowerShell（官方默认）";
+}
+$("all").onclick = () => {
   TARGETS.forEach(t => selected.add(t[0]));
   [...chipsEl.children].forEach(c => c.setAttribute("aria-pressed", "true"));
-  updateCount();
+  sync();
 };
-document.getElementById("none").onclick = () => {
+$("none").onclick = () => {
   selected.clear();
   [...chipsEl.children].forEach(c => c.setAttribute("aria-pressed", "false"));
-  updateCount();
+  sync();
 };
 
+/* DSH 选项 */
+function paintMode(){
+  $("c-inject").classList.toggle("on", opts.mode === "inject");
+  $("c-preset").classList.toggle("on", opts.mode === "preset");
+}
+optsEl.querySelectorAll('input[name="mode"]').forEach(el => {
+  el.onchange = () => {
+    if (el.checked){ opts.mode = el.value; paintMode(); paintSummary(); }
+  };
+});
+$("gitbash").onchange = e => { opts.gitBash = e.target.checked; paintSummary(); };
+if (!IS_WIN) $("gb-opt").style.display = "none";
+
+/* 操作：一键破甲单独做成大按钮，其余按「常用 / 更多」两组。
+   status 不出现在列表里 —— 顶部「先检测一下」就是它，列两遍只会让人猜两者有什么不同。 */
+const GROUP = {revert: 1, diagnose: 2, dryrun: 2, snapshot: 2, compare: 2};
 let busy = false;
 ACTIONS.forEach(([key, name, desc, kind]) => {
+  const g = GROUP[key];
+  if (!g) return;                       /* apply 由顶部大按钮承担 */
   const b = document.createElement("button");
-  b.className = "act" + (kind === "write" ? " danger" : "");
-  b.innerHTML = `<span class="name">${name}</span><span class="desc">${desc}</span><span class="arrow">›</span>`;
-  b.onclick = () => {
-    if (busy) return;
-    if (kind === "write") confirmRun(key, name);
-    else run(key);
-  };
-  actsEl.appendChild(b);
+  b.type = "button";
+  b.className = "act";
+  b.dataset.kind = kind;
+  b.dataset.action = key;
+  b.innerHTML = `<span class="n">${name}</span><span class="d">${desc}</span><span class="go">›</span>`;
+  b.onclick = () => { if (!busy) run(key); };
+  (g === 1 ? actsEl : acts2El).appendChild(b);
 });
 
-const modal = document.getElementById("modal");
+/* 确认框 */
+const modal = $("modal");
 let pending = null;
-function confirmRun(key, name){
-  pending = key;
-  document.getElementById("m-title").textContent = `确认${name}？`;
+function ask(action, name){
+  pending = action;
   const list = [...selected];
-  document.getElementById("m-desc").textContent = list.length
-    ? `将对 ${list.join(" / ")} 执行${name}。这会修改目标软件的文件，可用「还原」回退。`
-    : `未选择任何目标，将按 all 处理。这会修改目标软件的文件，可用「还原」回退。`;
+  $("m-title").textContent = `确认${name}？`;
+  $("m-desc").textContent = list.length
+    ? `将对下面 ${list.length} 个软件执行，这会修改它们的提示词或配置文件（改前自动备份）。`
+    : "还没勾选任何软件，会按「全部」处理，这会修改它们的提示词或配置文件（改前自动备份）。";
+  const kv = [];
+  kv.push(`<div><span>软件</span>${list.length ? list.join(" / ") : "全部"}</div>`);
+  if (selected.has("dsh") || !list.length){
+    kv.push(`<div><span>DSH</span>${opts.mode === "preset" ? "只加一个模式（不改官方文件）" : "改配置文件（所有模式生效）"}</div>`);
+    if (IS_WIN) kv.push(`<div><span>命令行</span>${opts.gitBash ? "改用 Git Bash（要重启 DSH）" : "保持 PowerShell"}</div>`);
+  }
+  kv.push(`<div><span>反悔</span>用「还原成原版」逐字节恢复</div>`);
+  $("m-kv").innerHTML = kv.join("");
   modal.classList.add("on");
+  $("m-cancel").focus();
 }
-document.getElementById("m-cancel").onclick = () => { modal.classList.remove("on"); pending = null; };
-document.getElementById("m-ok").onclick = () => {
-  modal.classList.remove("on");
-  if (pending) run(pending);
-  pending = null;
-};
+$("m-cancel").onclick = () => { modal.classList.remove("on"); pending = null; };
+$("m-ok").onclick = () => { modal.classList.remove("on"); if (pending) run(pending); pending = null; };
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && modal.classList.contains("on")){
+    modal.classList.remove("on"); pending = null;
+  }
+});
 
-document.getElementById("clear").onclick = () => {
-  outEl.innerHTML = '<span class="empty">等待操作…</span>';
+$("go").onclick = () => { if (!busy) ask("apply", "一键破甲"); };
+$("detect").onclick = () => { if (!busy) run("status"); };
+$("clear").onclick = () => {
+  outEl.innerHTML = '<span class="empty">已清空。</span>';
   elapsedEl.textContent = "";
+  setState("idle");
 };
 
+/* ANSI → HTML */
 const ANSI = {
-  "30":"#6b7686","31":"#e5807b","32":"#7ec699","33":"#e6c07b","34":"#82b7e8",
-  "35":"#c39ae0","36":"#79c9d1","37":"#c9d4e7","90":"#6b7686","91":"#e5807b",
-  "92":"#7ec699","93":"#e6c07b","94":"#82b7e8","95":"#c39ae0","96":"#79c9d1","97":"#ffffff"
+  "30":"#7d7566","31":"#e08a7c","32":"#8fc0a0","33":"#d9bb7c","34":"#8fa8cf",
+  "35":"#c3a0d6","36":"#86c3c6","37":"#e5ddce","90":"#7d7566","91":"#e08a7c",
+  "92":"#8fc0a0","93":"#d9bb7c","94":"#8fa8cf","95":"#c3a0d6","96":"#86c3c6","97":"#fbf9f4"
 };
 function esc(s){ return s.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 function ansiToHtml(line){
-  let out = "", open = 0;
+  let out = "", open = 0, last = 0, m;
   const re = /\x1b\[([0-9;]*)m/g;
-  let last = 0, m;
   while ((m = re.exec(line)) !== null){
     out += esc(line.slice(last, m.index));
     last = m.index + m[0].length;
     const codes = m[1].split(";").filter(Boolean);
     if (!codes.length || codes.includes("0")){
-      out += "</span>".repeat(open); open = 0;
-      continue;
+      out += "</span>".repeat(open); open = 0; continue;
     }
     for (const c of codes){
       const color = ANSI[c];
@@ -540,31 +868,47 @@ function ansiToHtml(line){
     }
   }
   out += esc(line.slice(last));
-  out += "</span>".repeat(open);
-  return out;
+  return out + "</span>".repeat(open);
 }
 
-let firstChunk = true;
+let stateTimer = null;
+function setState(kind){
+  clearTimeout(stateTimer);
+  stateEl.classList.remove("busy", "bad", "good");
+  if (kind === "busy"){ stateEl.classList.add("busy"); stateText.textContent = "处理中…"; }
+  else if (kind === "bad"){ stateEl.classList.add("bad"); stateText.textContent = "有问题，看下面"; }
+  else if (kind === "good"){ stateEl.classList.add("good"); stateText.textContent = "完成"; }
+  else stateText.textContent = "待命中";
+}
+/* 输出里出现这些字样就当成「没跑通」，胶囊转红，省得小白翻几百行找 */
+const BAD = /(\[!\]|\[x\]|Traceback|失败|出错|错误：|Error:|not found|拒绝访问)/i;
+
+let started = false;
 async function run(action){
   if (busy) return;
   busy = true;
-  stateEl.classList.add("busy");
-  stateText.textContent = "运行中";
-  consoleHead.classList.add("on");
-  if (firstChunk){ outEl.innerHTML = ""; firstChunk = false; }
+  setState("busy");
+  consoleEl.classList.add("on");
+  goBtn.disabled = true;
+  document.querySelectorAll(".act").forEach(b => b.disabled = true);
+  if (!started){ outEl.innerHTML = ""; started = true; }
   const t0 = Date.now();
   const timer = setInterval(() => {
     elapsedEl.textContent = ((Date.now() - t0) / 1000).toFixed(1) + "s";
   }, 100);
-
+  let plain = "";
   try{
     const res = await fetch(`/api/run?t=${TOKEN}`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({action, targets: [...selected], confirm: true})
+      body: JSON.stringify({
+        action, targets: [...selected], confirm: true,
+        dsh_mode: opts.mode, git_bash: opts.gitBash
+      })
     });
     if (!res.ok || !res.body){
-      outEl.insertAdjacentHTML("beforeend", `<span style="color:#e5807b">请求失败：HTTP ${res.status}</span>\n`);
+      outEl.insertAdjacentHTML("beforeend", `<span style="color:#e08a7c">请求失败：HTTP ${res.status}</span>\n`);
+      plain += "失败";
     } else {
       const reader = res.body.getReader();
       const dec = new TextDecoder("utf-8");
@@ -575,22 +919,34 @@ async function run(action){
         buf += dec.decode(value, {stream: true});
         const parts = buf.split("\n");
         buf = parts.pop();
-        for (const p of parts) outEl.insertAdjacentHTML("beforeend", ansiToHtml(p) + "\n");
+        for (const p of parts){
+          plain += p + "\n";
+          outEl.insertAdjacentHTML("beforeend", ansiToHtml(p) + "\n");
+        }
         outEl.scrollTop = outEl.scrollHeight;
       }
-      if (buf) outEl.insertAdjacentHTML("beforeend", ansiToHtml(buf) + "\n");
+      if (buf){
+        plain += buf;
+        outEl.insertAdjacentHTML("beforeend", ansiToHtml(buf) + "\n");
+      }
     }
   }catch(e){
-    outEl.insertAdjacentHTML("beforeend", `<span style="color:#e5807b">${esc(String(e))}</span>\n`);
+    plain += String(e);
+    outEl.insertAdjacentHTML("beforeend", `<span style="color:#e08a7c">${esc(String(e))}</span>\n`);
   }finally{
     clearInterval(timer);
     busy = false;
-    stateEl.classList.remove("busy");
-    stateText.textContent = "就绪";
-    consoleHead.classList.remove("on");
+    consoleEl.classList.remove("on");
     outEl.scrollTop = outEl.scrollHeight;
+    const bad = BAD.test(plain);
+    setState(bad ? "bad" : "good");
+    stateTimer = setTimeout(() => { if (!busy) setState("idle"); }, bad ? 12000 : 5000);
+    document.querySelectorAll(".act").forEach(b => b.disabled = false);
+    sync();
   }
 }
+
+sync();
 </script>
 </body>
 </html>
@@ -602,7 +958,10 @@ def render_page():
             .replace("__VERSION__", core_version())
             .replace("__TOKEN__", TOKEN)
             .replace("__TARGETS__", json.dumps(TARGETS, ensure_ascii=False))
-            .replace("__ACTIONS__", json.dumps(ACTIONS, ensure_ascii=False)))
+            .replace("__ACTIONS__", json.dumps(ACTIONS, ensure_ascii=False))
+            .replace("__REPO__", REPO_URL)
+            .replace("__REPO_NAME__", REPO_NAME)
+            .replace("__ISWIN__", "true" if IS_WIN else "false"))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -641,7 +1000,9 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(targets, list):
             targets = []
         targets = [t for t in targets if t in dict(TARGETS)]
-        cmd = build_cmd(action, targets)
+        # 两个可选项由前端传上来，这里再收一次口 —— 见 pick_options 的说明。
+        dsh_mode, git_bash = pick_options(payload)
+        cmd = build_cmd(action, targets, dsh_mode, git_bash)
         if not cmd:
             self.send_error(400, "bad action")
             return
