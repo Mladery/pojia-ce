@@ -1815,7 +1815,7 @@ def guard_install(dsh_home, dry=False):
     done = []
     # 1) 插件本体
     if dry:
-        done.append("[预演] 插件文件 x2")
+        done.append("插件文件 x2")
     else:
         try:
             os.makedirs(pkg, exist_ok=True)
@@ -1836,7 +1836,7 @@ def guard_install(dsh_home, dry=False):
             if ("id: " + GUARD_ID) in txt:
                 done.append("patch.yml 已有条目")
             elif dry:
-                done.append("[预演] patch.yml insert")
+                done.append("patch.yml insert")
             else:
                 _guard_keep(yml)
                 if txt and not txt.endswith("\n"):
@@ -1844,7 +1844,7 @@ def guard_install(dsh_home, dry=False):
                 write_text(yml, txt + GUARD_ENTRY, bom=bom)
                 done.append("patch.yml insert")
         elif dry:
-            done.append("[预演] patch.yml 新建")
+            done.append("patch.yml 新建")
         else:
             _atomic_write(yml, GUARD_ENTRY.encode("utf-8"))
             done.append("patch.yml 新建")
@@ -1861,7 +1861,7 @@ def guard_install(dsh_home, dry=False):
             if GUARD_ID in deps:
                 done.append("package.json 已登记")
             elif dry:
-                done.append("[预演] package.json 依赖")
+                done.append("package.json 依赖")
             else:
                 _guard_keep(pj)
                 deps[GUARD_ID] = GUARD_DEP
@@ -1871,8 +1871,10 @@ def guard_install(dsh_home, dry=False):
         except Exception as e:
             return False, "package.json 更新失败：%s" % e
 
-    tail = "，重启 DSH 后生效" if not dry else ""
-    return True, "运行时守卫已安装（%s）%s" % ("、".join(done), tail)
+    # 预演说"将安装"——写成"已安装"会让人以为磁盘上已经有了（本机预演实测就误导过）。
+    head = "运行时守卫将安装" if dry else "运行时守卫已安装"
+    tail = "" if dry else "，重启 DSH 后生效"
+    return True, "%s（%s）%s" % (head, "、".join(done), tail)
 
 
 def guard_remove(dsh_home, dry=False):

@@ -364,7 +364,7 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 ## 六、校验
 
 ```
-6f630e6c7f95ddf48cca0b10662d27c118065eaeed63d8aef64916d54728f9b0  src/破甲一键通.py           (413,774 B / LF)
+a6810ebfccdec681528c9fea5185763e689701f259bc991c7d46ee30dba525c5  src/破甲一键通.py           (413,920 B / LF)
 e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
