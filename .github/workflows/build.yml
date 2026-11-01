@@ -161,9 +161,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "$TAG" --generate-notes \
-            || true
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已被并发 job 建好，这里只上传产物"
+          else
+            # 有手写的发布说明就用它，没有才退回自动生成 —— 自动生成会把
+            # 从第一个提交起的全部 commit 标题堆上来，对使用者没意义。
+            NOTES="docs/release-notes/$TAG.md"
+            if [ -f "$NOTES" ]; then
+              gh release create "$TAG" --title "破甲一键通 ${TAG#v}" --notes-file "$NOTES"
+            else
+              gh release create "$TAG" --title "破甲一键通 ${TAG#v}" --generate-notes
+            fi
+          fi
           gh release upload "$TAG" "out/$BIN_NAME-${{ matrix.asset }}${{ matrix.ext }}" --clobber
 
   # 四个平台的产物汇总成一份校验和。Windows 走签名验签，另外三个平台只有
