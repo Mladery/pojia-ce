@@ -5,11 +5,13 @@
  破甲一键通  v8.0 (纯净社区版)   （多目标统一脚本 · 命令行版）
 ================================================================================
 
- 把桌面那几套破甲工具合并成【一个脚本】，一套人格，十五个目标：
+ 把桌面那几套破甲工具合并成【一个脚本】，一套人格，十六个目标：
 
      dsh        —— DeepSeek Harness（DSH Desktop / 官方 npm 全局 / npx 缓存 / 便携版）
      wb         —— WorkBuddy（六层靶点：模板 / product.json / 命令闸门 / 网页过滤 /
                           运行时缓存 / 会话快照 ＋ 账号级云记忆 memoryBlock）
+     wbintl     —— WorkBuddy 国际版（WorkBuddyAI.exe；靶点/补丁/备份继承 wb，
+                          只改定位：进程反查优先 + 安装根双验 + ~/.workbuddy-ai）
      zcode      —— ZCode（智谱 zcode.z.ai：AGENTS.md / Memory / 技能 / 可选 cjs 系统提示词）
      codex      —— OpenAI Codex CLI（config.toml model_instructions_file）
      cursor     —— Cursor（.cursor/rules/*.mdc）
@@ -2917,8 +2919,8 @@ class WorkBuddyTarget:
         install = self.resolve_install_dir(getattr(args, self.install_attr, "") or "")
         data_dir = self.resolve_data_dir(getattr(args, self.data_attr, "") or "")
         log("安装目录 : %s" % (install or "(未找到，请手动指定安装目录)"),
-            "g" if install else "red", "wb")
-        log("数据目录 : %s%s" % (data_dir, "" if os.path.isdir(data_dir) else "  (不存在)"), "", "wb")
+            "g" if install else "red", self.key)
+        log("数据目录 : %s%s" % (data_dir, "" if os.path.isdir(data_dir) else "  (不存在)"), "", self.key)
         user, _src = load_user_persona(getattr(args, "persona", "") or "")
         _pol, want = build_policy(user)
 
@@ -2936,9 +2938,9 @@ class WorkBuddyTarget:
                 other_n += 1
                 if getattr(args, "diagnose", False):
                     log("  [other ] %s  （宽松态，人格哈希来自上一版）"
-                        % rel_display(t, install, data_dir), "dg", "wb")
+                        % rel_display(t, install, data_dir), "dg", self.key)
         log("模板靶点 : 含政策块 %d 个，本版本宽松 %d 个，旧人格宽松 %d 个" % (pol_n, loose_n, other_n),
-            "g" if pol_n and (loose_n + other_n) == pol_n else "y", "wb")
+            "g" if pol_n and (loose_n + other_n) == pol_n else "y", self.key)
 
         for p in self.js_files(install):
             txt = read_text_safe(p) or ""
@@ -2947,11 +2949,11 @@ class WorkBuddyTarget:
             log("命令闸门 : %-24s %s   网页过滤 %s" % (os.path.basename(p),
                                                     "已解锁" if gate else "未解锁",
                                                     "已解除" if wf else "未解除"),
-                "g" if gate else "y", "wb")
+                "g" if gate else "y", self.key)
             if getattr(args, "diagnose", False):
                 g = sum(1 for fn in GATE_FUNCS
                         if re.search(r'function\s+' + fn + r'\s*\([^)]*\)\s*\{\s*return\{behavior:"allow"\};', txt))
-                log("           闸门命中 %d/2  文件 %s" % (g, _human_size(os.path.getsize(p))), "dg", "wb")
+                log("           闸门命中 %d/2  文件 %s" % (g, _human_size(os.path.getsize(p))), "dg", self.key)
 
         guard_hit = 0
         for t in targets:
@@ -2959,13 +2961,13 @@ class WorkBuddyTarget:
             if ("<personal_files_safety>" in txt) or ("<removed_by_unlock_v4>" in txt):
                 guard_hit += 1
         log("文件保护 : %s" % ("已中和" if guard_hit == 0 else "%d 个文件未中和" % guard_hit),
-            "g" if guard_hit == 0 else "y", "wb")
+            "g" if guard_hit == 0 else "y", self.key)
 
         cache = os.path.join(data_dir, "cache", "acc-product-config-v3.json")
-        log("运行时缓存: %s" % ("存在" if os.path.exists(cache) else "已清除（下次启动重建）"), "dg", "wb")
+        log("运行时缓存: %s" % ("存在" if os.path.exists(cache) else "已清除（下次启动重建）"), "dg", self.key)
 
         if not self.scheduled_task_names():
-            log("守护任务 : 未安装（--guard install 可装）", "dg", "wb")
+            log("守护任务 : 未安装（--guard install 可装）", "dg", self.key)
         else:
             self.audit_guard_tasks(verbose=True)
         return targets, install, data_dir
