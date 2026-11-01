@@ -76,6 +76,7 @@ TARGETS = [
     ("windsurf", "Windsurf"),
     ("cline", "Cline"),
     ("copilot", "Copilot CLI"),
+    ("kiro", "Kiro"),
 ]
 
 ACTIONS = [

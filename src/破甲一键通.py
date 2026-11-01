@@ -208,7 +208,7 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess.Popen = _popen_no_window
     subprocess._dsh_no_window_patched = True
 
-VERSION = "8.3"
+VERSION = "8.4"
 # 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
 # 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
 # "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。
@@ -6094,9 +6094,15 @@ class _MarkBlockTarget:
             return self.revert(args)
 
         if not os.path.isdir(home):
-            log("未检测到 %s 安装，跳过。（装了就用 --pick %s 指定，或 %s）"
-                % (self.label, self.key, " / ".join("--" + v.lower().replace("_", "-") for v in self.env_vars)),
-                "y", self.key)
+            # 这里原来把环境变量名当命令行参数报（QWEN_CONFIG_DIR → "--qwen-config-dir"），
+            # 用户照着敲必然 unrecognized arguments。分开说：--pick / --<key>-dir 是参数，
+            # 剩下的是**环境变量**，要 export 才有用。
+            _how = ["--pick %s" % self.key]
+            if getattr(self, "arg_name", ""):
+                _how.append("--" + self.arg_name.replace("_", "-"))
+            _env = ("，或设环境变量 " + " / ".join(self.env_vars)) if self.env_vars else ""
+            log("未检测到 %s 安装，跳过。（装了就用 %s 指定目录%s）"
+                % (self.label, " 或 ".join(_how), _env), "y", self.key)
             return {"skip": 1}
 
         target = self.prompt_path(home)
@@ -7038,6 +7044,74 @@ class CopilotTarget(_MarkBlockTarget):
         return "", "这里不像 Copilot CLI 配置目录。要选 .copilot 那一层（里面通常有 agent 或 instructions 相关文件）。"
 
 
+class KiroTarget(_MarkBlockTarget):
+    """Kiro（AWS 的 agentic IDE，VS Code 派生）。
+
+    它没有 CLAUDE.md / AGENTS.md 那种"一个总规则文件"，而是 **steering 目录**：
+    `~/.kiro/steering/**/*.md`，每次开 chat 由内置的几个 agent 全量加载。
+    默认 inclusion 就是 always（不写 front matter 也算 always），所以最稳的落点
+    是 steering 下单独一个文件 —— 不碰用户自己的 product.md / tech.md。
+
+    Kiro CLI 是另一套：全局 agent 在 `~/.kiro/agents/*.json`（prompt / resources
+    字段），全局设置 `~/.kiro/settings/cli.json`。这里只处理桌面端 steering；
+    CLI 那份是结构化 JSON，硬改容易把用户的 agent 配置写坏，不做。
+    """
+
+    key = "kiro"
+    label = "Kiro"
+    home_name = ".kiro"
+    prompt_file = os.path.join("steering", "pojia-inject.md")
+    bak_suffix = BAK_MARK
+    arg_name = "kiro_dir"
+    env_vars = ("KIRO_HOME",)
+    proc_names = ("Kiro.exe", "Kiro")
+    app_exe = ("Kiro.exe",)
+
+    def pick_title(self):
+        return "选择 Kiro 的配置目录（一般是 用户目录\\.kiro）"
+
+    def pick_hint(self):
+        return os.path.expanduser("~")
+
+    def resolve_pick(self, path):
+        p = os.path.normpath(os.path.expanduser(path))
+        low = os.path.basename(p).lower()
+        if low == ".kiro":
+            return p, ""
+        if low == "steering":
+            return os.path.dirname(p), ""
+        cand = os.path.join(p, ".kiro")
+        if os.path.isdir(cand):
+            return cand, ""
+        if os.path.isdir(os.path.join(p, "steering")):
+            return p, ""
+        return "", "这里不像 Kiro 配置目录。要选 .kiro 那一层（里面通常有 steering\\）。"
+
+    def extra_checks(self, home, args):
+        rows = [("info", "提示：Kiro 还读各工程 .kiro\\steering\\ 与工程根的 AGENTS.md，本工具只处理用户级", "")]
+        # steering 下**所有** .md 都会被加载，我们那份只是其中之一。把同在生效的
+        # 其他规则列出来 —— 人格被别的规则压住时，用户能立刻看出是撞了哪份。
+        sd = os.path.join(home, "steering")
+        others = []
+        if os.path.isdir(sd):
+            mine = os.path.basename(self.prompt_file).lower()
+            for dirpath, _dirs, files in os.walk(sd):
+                for fn in files:
+                    if fn.lower().endswith(".md") and fn.lower() != mine:
+                        others.append(os.path.relpath(os.path.join(dirpath, fn), sd))
+        if others:
+            others.sort()
+            more = "" if len(others) <= 4 else " 等 %d 份" % len(others)
+            rows.append(("info", "steering 下另有 %d 份规则同时在生效：%s%s"
+                         % (len(others), "、".join(others[:4]), more), ""))
+        # 只有 .kiro 而没有桌面端数据目录，多半只装了 Kiro CLI —— 那 steering 读不到。
+        appdata = os.environ.get("APPDATA") or ""
+        if appdata and not os.path.isdir(os.path.join(appdata, "Kiro")):
+            rows.append(("info", "没看到 Kiro 桌面端数据目录（%APPDATA%\\Kiro）",
+                         "只装了 Kiro CLI 的话 steering 不生效 —— CLI 走 ~/.kiro/agents/*.json"))
+        return rows
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  五、统一调度
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7047,7 +7121,8 @@ TARGETS = {"dsh": DshTarget, "wb": WorkBuddyTarget, "wbintl": WorkBuddyGlobalTar
            "codex": CodexTarget, "cursor": CursorTarget, "claude": ClaudeTarget,
            "gemini": GeminiTarget, "qwen": QwenTarget, "iflow": IflowTarget,
            "trae": TraeTarget, "codebuddy": CodeBuddyTarget, "opencode": OpenCodeTarget,
-           "windsurf": WindsurfTarget, "cline": ClineTarget, "copilot": CopilotTarget}
+           "windsurf": WindsurfTarget, "cline": ClineTarget, "copilot": CopilotTarget,
+           "kiro": KiroTarget}
 TARGET_ALIAS = {"workbuddy": "wb",
                 "workbuddy-ai": "wbintl", "workbuddyai": "wbintl",
                 "workbuddy-intl": "wbintl", "wbai": "wbintl",
@@ -7062,10 +7137,11 @@ TARGET_ALIAS = {"workbuddy": "wb",
                 "codebuddy-cli": "codebuddy", "tencent": "codebuddy",
                 "codeium": "windsurf",
                 "copilot-cli": "copilot", "github": "copilot",
+                "kiro-ide": "kiro", "kiro-cli": "kiro", "aws": "kiro",
                 "all": "all"}
 DEFAULT_TARGETS = ["dsh", "wb", "wbintl", "zcode", "codex", "cursor", "claude",
                    "gemini", "qwen", "iflow", "trae", "codebuddy",
-                   "opencode", "windsurf", "cline", "copilot"]
+                   "opencode", "windsurf", "cline", "copilot", "kiro"]
 
 # 界面用的短名。启动横幅由它 + DEFAULT_TARGETS 拼出来 ——
 # 原来横幅写死成 "DSH / WorkBuddy / ZCode"，v7.7 加到六个目标后忘了同步，
@@ -7074,7 +7150,8 @@ TARGET_LABEL = {"dsh": "DSH", "wb": "WorkBuddy", "wbintl": "WorkBuddy Intl", "zc
                 "codex": "Codex", "cursor": "Cursor", "claude": "Claude Code",
                 "gemini": "Gemini CLI", "qwen": "Qwen Code", "iflow": "iFlow CLI",
                 "trae": "Trae", "codebuddy": "CodeBuddy", "opencode": "OpenCode",
-                "windsurf": "Windsurf", "cline": "Cline", "copilot": "Copilot CLI"}
+                "windsurf": "Windsurf", "cline": "Cline", "copilot": "Copilot CLI",
+                "kiro": "Kiro"}
 
 
 def resolve_targets(spec):
@@ -7683,6 +7760,20 @@ def build_parser():
     p.add_argument("--version", action="version", version="破甲一键通 " + VER_TAG)
     p.add_argument("--gui", action="store_true",
                    help="打开图形界面（本机网页 UI，零依赖）")
+    # 每个标记块目标都有自己的 --<key>-dir。以前只显式注册了 codex / cursor / claude
+    # 三个，其余十个在提示里写着「用 --cline-dir 指定」，实际根本没注册 —— 用户照着
+    # 敲就撞 unrecognized arguments，越按提示走越进不去。这里按 TARGETS 兜底补齐，
+    # 以后加目标自动就有参数，不会再漏。
+    _have = set()
+    for _a in p._actions:
+        for _o in _a.option_strings:
+            _have.add(_o.lstrip("-").replace("-", "_"))
+    for _k in DEFAULT_TARGETS:
+        _dest = getattr(TARGETS[_k], "arg_name", "")
+        if not _dest or _dest in _have:
+            continue
+        p.add_argument("--" + _dest.replace("_", "-"), dest=_dest,
+                       help="手动指定 %s 的配置目录" % TARGET_LABEL.get(_k, _k))
     return p
 
 

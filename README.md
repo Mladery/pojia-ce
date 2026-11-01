@@ -1,6 +1,6 @@
 # 破甲一键通 · 社区版（Community Edition）
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.3-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.4-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。
 > MIT 协议，**非官方**，与原作者无隶属关系；本项目按自己的节奏演进，不跟随上游成品。
 
@@ -10,7 +10,7 @@
 
 ## 一、这是什么
 
-一个 Python 脚本，把散落的十几套「破甲」工具合并成一份：**一套人格，十六个目标**，可追加、可整块替换、可完整还原。无第三方依赖，Python 3.8+。
+一个 Python 脚本，把散落的十几套「破甲」工具合并成一份：**一套人格，十七个目标**，可追加、可整块替换、可完整还原。无第三方依赖，Python 3.8+。
 
 本仓库与上游的关系只有一层：`upstream/` 存的是 `536ece2` 那份公开源码的快照，`src/` 是在它基础上摘掉加密封条后的可运行版本。上游 2026-10-13 移除源码、转入 exe + 激活码发行之后，本项目接手独立维护。完整时间线与逐条取证在 [evidence/](evidence/)，正文不再重复。
 
@@ -36,6 +36,7 @@
 | `windsurf` | Windsurf（`~/.codeium/windsurf/memories/global_rules.md`） |
 | `cline` | Cline（`~/Documents/Cline/Rules/pojia-inject.md`） |
 | `copilot` | GitHub Copilot CLI（`~/.copilot/copilot-instructions.md`） |
+| `kiro` | Kiro（`~/.kiro/steering/pojia-inject.md`，steering 全量加载）—— **本仓库新增** |
 
 ---
 
@@ -185,7 +186,19 @@ npm 全局装的和官方安装的是**两份独立拷贝**（本机实测同为
 
 **Trae 双发行版。** Trae 有国内版与国际版两个包，配置目录分别是 `~/.trae` 与 `~/.trae-cn`，进程名、可执行文件名都不一样。现在两个候选目录、两个环境变量、三个进程名一起找，命中哪个用哪个；装了另一版会在体检里提醒一句，避免「以为没装」。
 
-### 10. 与上游的差异
+### 10. 新增目标 `kiro`（Kiro / AWS agentic IDE）
+
+Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「一个总规则文件」，用的是 **steering 目录**：`~/.kiro/steering/**/*.md`，每次开 chat 由内置的几个 agent 全量加载。默认 `inclusion` 就是 `always`（不写 front matter 也算 always），所以落点是 steering 下**单独一个文件** `pojia-inject.md`——不碰用户自己的 `product.md` / `tech.md`。
+
+几个刻意的取舍：
+
+- **不动 `~/.kiro/agents/*.json`。** Kiro CLI 的全局 agent 是结构化 JSON（`prompt` / `resources` 字段），硬改容易把用户的 agent 配置写坏，收益还不如 steering 一份文件。
+- **列清同在生效的规则。** steering 下所有 `.md` 都会被加载，我们那份只是其中之一；`--check` 会把其他几份列出来，人格被别的规则压住时能立刻看出是撞了哪份。
+- **CLI-only 的情况说清楚。** 只有 `~/.kiro` 而没有桌面端数据目录（`%APPDATA%\Kiro`）时，提示一句「steering 是桌面端读的，CLI 走 agents/*.json」，免得用户以为打上了。
+
+顺带修掉一个存在很久的坑：**十个 `--<key>-dir` 参数根本没注册**。`--gemini-dir` / `--trae-dir` / `--cline-dir` / `--kiro-dir` 这些在提示文案里写着「装了就用它指定」，实际 argparse 里没有，照着敲只会得到 `unrecognized arguments`——越按提示走越进不去。现在按目标表兜底注册，以后加目标自动就有参数。同一处还有一句把**环境变量**写成命令行参数的提示（`QWEN_CONFIG_DIR` → `--qwen-config-dir`），一并改成「`--pick` / `--<key>-dir` 是参数，剩下的是要 export 的环境变量」。
+
+### 11. 与上游的差异
 
 截至 2026-11-01，与上游最新公开文档逐条比对：
 
@@ -201,9 +214,11 @@ npm 全局装的和官方安装的是**两份独立拷贝**（本机实测同为
 | 长上下文重复注入 | 未见 | 主块 + 独立镜像块，任一在位即可 |
 | Electron `OnlyLoadAppFromAsar` 保险丝 | 未见 | 自动探测并关闭，改前留备份 |
 | Trae 国内版 / 国际版 | 只认一个配置目录 | `~/.trae` / `~/.trae-cn` 双候选 |
+| Kiro（steering） | 未见 | 独立目标，写 `~/.kiro/steering/pojia-inject.md` |
+| `--<key>-dir` 手动指定 | 未见 | 按目标表兜底注册，加目标自动就有 |
 | 写后自检 | 未见 | 回读复核，不合格即按备份回滚 |
 | Windows 长路径 | 未见 | 超过 240 字符自动加 `\\?\` 前缀 |
-| 目标数量 | 15 | 16 |
+| 目标数量 | 15 | 17 |
 
 > 保留意见：上游自 v8.14 起不再公开源码，上表依据其 README 与更新日志比对，「未见」只代表文档未声明，不等于其代码中一定没有。安装目录发现一项上游明确是有的，差异在「猜固定目录名」与「按盘符 × 深度实找」之间。
 
@@ -212,8 +227,8 @@ npm 全局装的和官方安装的是**两份独立拷贝**（本机实测同为
 ## 六、校验
 
 ```
-342af6577925b07314dd2daefde7477ac4591511336b3b0ca02580e4dea8fcae  src/破甲一键通.py           (385,565 B / LF)
-7b09ba3574f3c1728adc649c154dd5292a907eec08379edffe2adeba594a7e52  src/破甲GUI.py              (23,658 B / LF)
+1c8579a9c5fc7a375cd090b14fe1cc97472c86a479cc5d89416e5337cd59d774  src/破甲一键通.py           (390,298 B / LF)
+e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
 
@@ -224,9 +239,9 @@ git clone https://github.com/z91772524-ai/pojia-next && cd pojia-next
 git show 536ece2:破甲一键通.py | sha256sum
 ```
 
-`src/破甲一键通.py` 现在比 `upstream/` 大 34,172 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检）。
+`src/破甲一键通.py` 现在比 `upstream/` 大 38,905 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标）。
 
-版本号分两段存：`VERSION = "8.3"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.3-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
+版本号分两段存：`VERSION = "8.4"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.4-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
 ---
 
