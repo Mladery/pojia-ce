@@ -30,3 +30,10 @@ src/状态/
 build/
 dist/
 *.spec
+
+# 签名私钥与证书：绝不入库。*.pfx/*.pvk 是私钥，泄漏等于任何人都能冒充发布者。
+*.pfx
+*.pvk
+*.spc
+*.p12
+*.cer

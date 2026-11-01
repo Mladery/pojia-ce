@@ -81,7 +81,7 @@ python src/破甲一键通.py --revert --target wb
 三点要提前说：
 
 - **macOS 首次运行会被 Gatekeeper 拦**（未签名）。解掉隔离标记即可：`xattr -d com.apple.quarantine ./pojia-ce-macos-arm64`。
-- **Windows Defender 可能对单文件 exe 报毒** —— PyInstaller 的引导器是常见误报对象。要绝对干净就用源码跑，或者自己 `python -m PyInstaller` 打一份。
+- **Windows Defender 可能对单文件 exe 报毒** —— PyInstaller 的引导器是常见误报对象。签名（见 §五.13）能让属性页显示发布者、本机少挨一次拦截，但**改变不了别人机器上的判断**。要绝对干净就用源码跑，或者自己 `python -m PyInstaller` 打一份。
 - 打包版**不含图形界面**：GUI 要起一个 Python 进程，单文件包里没有解释器。要 GUI 请从源码跑 `python src/破甲GUI.py`。
 
 ---
@@ -265,7 +265,35 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 
 打包命令里还有个跨盘符的坑：`--specpath` 必须和源码同盘，PyInstaller 内部用 `relpath` 算相对路径，`J:` 的源码配 `C:` 的临时目录直接 `ValueError`。
 
-### 13. 与上游的差异
+### 13. 代码签名（Windows）
+
+自签证书能做什么、不能做什么，先说清楚：
+
+- **能**：文件属性页显示发布者名字，不再是「未知发布者」；本机把根证书加进信任后 `Get-AuthenticodeSignature` 就是 `Valid`；自己机器和企业内分发时少挨一次 SmartScreen 首次拦截。
+- **不能**：对**别人的**电脑没有任何信誉作用。自签根不在他们的信任列表里，照样弹「未知发布者」，SmartScreen 也不会因此放行。要让陌生人的机器不报警，只有买 CA 的 OV/EV 证书一条路。
+
+两个脚本：
+
+```powershell
+# 生成（默认 RSA 4096 / SHA-256 / 10 年；-Trust 顺带让本机信任）
+.\tools\make-signing-cert.ps1 -OutDir D:\certs -Trust
+
+# 签名（不传 -Password 就从 pfx 同目录的密码文件读）
+.\tools\sign-windows.ps1 -Exe build\dist\pojia-ce.exe -Pfx D:\certs\pojia-signing.pfx
+```
+
+**为什么不用 makecert + cert2spc。** 那套 1998 年的工具只能出 MD5 签名、1024 位、且没有 CodeSigning EKU 的证书，现代 Windows 根本不认 —— `signtool sign` 会直接报 `No certificates were found that met all the given criteria`，因为它连选都不会选这张证书。`New-SelfSignedCertificate` 才能出 SHA-256 + RSA 4096 + 正确 EKU 的。
+
+**CI 里怎么签。** 私钥不进仓库（`.gitignore` 挡掉 `*.pfx` / `*.pvk` / `*.spc` / `*.p12` / `*.cer`），改成两个 secret：
+
+| Secret | 内容 |
+|---|---|
+| `WINDOWS_SIGNING_PFX_BASE64` | pfx 的 base64（本机转：读字节 → ToBase64String → 粘进 Settings → Secrets → Actions） |
+| `WINDOWS_SIGNING_PFX_PASSWORD` | pfx 密码 |
+
+两个都没配就自动跳过，产物照发，只是显示「未知发布者」——不会让流水线变红。签名步骤放在冒烟之前，这样万一签名把 exe 弄坏了，冒烟能立刻抓到。
+
+### 14. 与上游的差异
 
 截至 2026-11-01，与上游最新公开文档逐条比对：
 
@@ -324,6 +352,7 @@ upstream/破甲一键通.v8.14.py    上游 536ece2 的原始核心，未改动�
 tests/                         测试：标记块往返 / 保险丝 / 目标注册表 / 命令行冒烟
 .github/workflows/ci.yml       CI：三平台 × 多 Python 版本跑一遍
 .github/workflows/build.yml    Build：四个平台打单文件可执行文件，打 tag 发 Release
+tools/                         签名工具：生成自签证书 / 给产物签名（PowerShell）
 evidence/                      取证材料：提交时间线、群聊记录、防二改机制拆解
 ```
 
