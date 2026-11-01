@@ -189,3 +189,68 @@ def test_preset_keeps_foreign_bak_untouched(core, home):
     core.preset_install(str(h), [str(base)], _persona(core))
     bak = _yml(h).with_suffix(".yml." + core.PRESET_MARK + ".bak")
     assert bak.exists() and bak.read_bytes() == before
+
+
+# ---- 没解包也要能装：模板从 app.asar 里读 -----------------------------------
+import json
+import struct
+
+
+def _make_asar(path, entries):
+    """造一个最小可用的 asar：12 字节占位 + json 长度 + header + 数据区。
+
+    entries: {asar 内相对路径: 文件字节}
+    """
+    files, data = {}, b""
+    for rel, blob in entries.items():
+        parts = rel.split("/")
+        node = files
+        for p in parts[:-1]:
+            node = node.setdefault(p, {"files": {}})["files"]
+        node[parts[-1]] = {"size": len(blob), "offset": str(len(data))}
+        data += blob
+    hdr = json.dumps({"files": files}).encode("utf-8")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"\0" * 12 + struct.pack("<I", len(hdr)) + hdr + data)
+
+
+def _std_in_asar(tmp_path):
+    root = tmp_path / "asarinst"
+    _make_asar(str(root / "resources" / "app.asar"),
+               {"dsh/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml":
+                STD_YML.encode("utf-8")})
+    return str(root)
+
+
+def test_asar_read_file(core, tmp_path):
+    root = _std_in_asar(tmp_path)
+    got = core.asar_read_file(os.path.join(root, "resources", "app.asar"),
+                              "dsh/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml")
+    assert got is not None and got.decode("utf-8") == STD_YML
+    assert core.asar_read_file(os.path.join(root, "resources", "app.asar"), "nope.yml") is None
+
+
+def test_preset_std_text_falls_back_to_asar(core, tmp_path):
+    root = _std_in_asar(tmp_path)
+    txt, src = core.preset_std_text([], [root])
+    assert "preset-standard" in txt
+    assert src.startswith("app.asar!")
+
+
+def test_preset_install_without_unpacked_dir(core, home, tmp_path):
+    """解包目录不存在（revert 之后就是这样）也要能装 —— 模板走 asar。"""
+    h, _base = home
+    root = _std_in_asar(tmp_path)
+    ok, note = core.preset_install(str(h), [], _persona(core), roots=[root])
+    assert ok, note
+    assert core.preset_state(str(h))[0] == "ok"
+    assert not os.path.isdir(os.path.join(root, "resources", "app")), "不该顺手解包"
+
+
+def test_preset_reports_clearly_when_nothing_found(core, home, tmp_path):
+    h, _base = home
+    empty = tmp_path / "void"
+    empty.mkdir()
+    ok, note = core.preset_install(str(h), [], "x", roots=[str(empty)])
+    assert not ok and "standard" in note and "app.asar" in note

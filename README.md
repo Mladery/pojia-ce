@@ -337,6 +337,9 @@ DSH 有两种破法，`--apply --target dsh` 时自己挑（交互菜单会问�
 
 - **工具清单不硬编码**：从本机已安装的 `dsh-web-app/presets/standard.patch.yml` 文本级克隆，
   宿主升级加删工具也跟着走；写死一份的话版本一变就少工具，变成半个残废模式。
+- **不解包也能装**：模板先在解包目录里找，找不到就直接从 `resources/app.asar` 里读
+  （asar 就是个容器，读单个条目不需要解 180 MB）。所以 `--revert` 把 `resources/app/`
+  删干净之后，破甲模式照样装得上 —— 这条路线本来就不该依赖解包。
 - **只动一行**：克隆后仅替换 `persona.prefix`（单行 JSON 字符串，避免块标量的缩进坑）。
 - **两个 profile 都写**：`profiles/desktop` 和 `profiles/web` 是独立的，只写一个另一边下拉里就没有。
 - **整段带标记**：首尾 `# >>> pojia-preset` / `# <<< pojia-preset`，卸载按标记整段摘，
@@ -425,7 +428,7 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 ## 六、校验
 
 ```
-c04c2c200bb000b03154e2de259d6d510ca0362943012157f380fc6da15bf8a1  src/破甲一键通.py           (442,280 B / LF)
+ad3ab17cb100fc2d8915dabfdea02e81b7ca4ccb8dbf74b265f9a81018df3848  src/破甲一键通.py           (445,873 B / LF)
 e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```

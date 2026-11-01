@@ -2143,22 +2143,19 @@ def preset_rows(dsh_home):
     return [(kind, note, "")]
 
 
-def preset_install(dsh_home, bases, prefix_text, dry=False):
-    """把破甲模式插进每个 profile 的 patch 层。幂等。"""
+def preset_install(dsh_home, bases, prefix_text, dry=False, roots=None):
+    """把破甲模式插进每个 profile 的 patch 层。幂等。
+
+    roots 是桌面端安装根（不解包也能给）：模板优先从解包目录取，没有就直接读
+    app.asar —— 破甲模式本来就不该依赖解包。
+    """
     profs = dsh_profiles(dsh_home)
     if not profs:
         return False, "未找到 profiles/*/cordis.patch.yml（非桌面版布局），跳过破甲模式"
-    std = ""
-    for b in bases or []:
-        std = preset_std_file(b)
-        if std:
-            break
-    if not std:
-        return False, "没找到 standard 预设（dsh-web-app/presets/standard.patch.yml），无法克隆工具清单"
-    try:
-        std_txt = read_text(std)[0] or ""
-    except Exception as e:
-        return False, "读 standard 预设失败：%s" % e
+    std_txt, _src = preset_std_text(bases, roots)
+    if not std_txt:
+        return False, ("没找到 standard 预设：解包目录和 app.asar 里都没有 "
+                       "dsh-web-app/presets/standard.patch.yml")
     block = preset_plugins_block(std_txt, prefix_text)
     if not block:
         return False, "standard 预设里没有 plugins 段或 persona.prefix，这个版本的布局不认识"
@@ -2407,6 +2404,68 @@ def revert_stamp_clear(root, home=None):
             os.remove(p)
     except Exception:
         pass
+
+
+def asar_read_file(asar_path, relpath):
+    """从 app.asar 里直接读一个文件的字节（unpacked 条目从 <asar>.unpacked 取）。
+
+    为什么需要它：破甲模式（预设）的卖点就是"不用解包"，可它的工具清单模板
+    `dsh-web-app/presets/standard.patch.yml` 恰好只存在于 asar 里。解包目录被删掉
+    之后（`--revert` 之后就是这样）不能逼用户重新解 180 MB，直接读 asar 就行。
+    """
+    if not asar_path or not os.path.isfile(asar_path):
+        return None
+    rel = relpath.replace("\\", "/").strip("/")
+    try:
+        files, data_base = DshTarget._asar_read_tree(asar_path)
+        node = {"files": files}
+        for part in rel.split("/"):
+            node = (node or {}).get("files", {}).get(part)
+            if node is None:
+                return None
+        if node.get("unpacked"):
+            p = os.path.join(asar_path + ".unpacked", *rel.split("/"))
+            if os.path.isfile(p):
+                with open(p, "rb") as g:
+                    return g.read()
+        off, size = node.get("offset"), node.get("size")
+        if off is None or size is None:
+            return None
+        with open(asar_path, "rb") as f:
+            f.seek(data_base + int(off))
+            return f.read(int(size))
+    except Exception:
+        return None
+
+
+# asar 里 standard 预设的两个可能位置（桌面端放 dsh/ 下，也有构建直接放根）
+_STD_ASAR_PATHS = (
+    "dsh/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml",
+    "node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml",
+)
+
+
+def preset_std_text(bases, roots):
+    """取已安装的 standard 预设文本。返回 (文本, 来源说明)。
+
+    两条路：磁盘上的解包目录 → asar 内部。后者让破甲模式完全不必解包。
+    """
+    for b in bases or []:
+        p = preset_std_file(b)
+        if p:
+            txt = read_text(p)[0] or ""
+            if txt.strip():
+                return txt, p
+    for r in roots or []:
+        asar = os.path.join(r, "resources", "app.asar")
+        for rel in _STD_ASAR_PATHS:
+            data = asar_read_file(asar, rel)
+            if data:
+                try:
+                    return data.decode("utf-8"), "app.asar!%s" % rel
+                except Exception:
+                    pass
+    return "", ""
 
 
 class DshTarget:
@@ -2999,6 +3058,36 @@ class DshTarget:
 
     def dsh_home(self):
         return dsh_home_path()
+
+    def desktop_roots(self, bases=None):
+        """能定位到的桌面端安装根 —— 只读、**不解包**。
+
+        破甲模式要用它：预设模板可能只在 app.asar 里，读 asar 只需要路径。
+        三个来源：已有靶点反推、还原戳记下的根、进程/快捷方式四源发现。
+        """
+        out, seen = [], set()
+
+        def add(p):
+            p = os.path.normpath(p or "")
+            if not p or not os.path.isdir(p):
+                return
+            k = os.path.normcase(os.path.abspath(p))
+            if k in seen:
+                return
+            seen.add(k)
+            out.append(p)
+
+        for b in (bases or []):
+            add(self._install_root_of(b))
+        for _k, _rec in revert_stamp_load(self.dsh_home()).items():
+            add((_rec or {}).get("root") or _k)
+        try:
+            app, _src = discover_app_root(self.DSH_EXE_NAMES, self._looks_like_app_root,
+                                          walk=False)
+            add(app)
+        except Exception:
+            pass
+        return out
 
     # ---------------- 备份 / 密封目录 ----------------
     def is_sealed_bin(self, dirpath):
@@ -3661,7 +3750,8 @@ class DshTarget:
             if preset_mode:
                 try:
                     _pok, _pnote = preset_install(
-                        h, bases, STRONG_INTRO + "\n\n" + persona, dry=False)
+                        h, bases, STRONG_INTRO + "\n\n" + persona, dry=False,
+                        roots=self.desktop_roots(bases))
                     log(_pnote, "g" if _pok else "y", "dsh")
                 except Exception as _pe:
                     log("破甲模式写入异常：%s" % _pe, "y", "dsh")
@@ -3674,7 +3764,8 @@ class DshTarget:
             if preset_mode:
                 try:
                     _pok, _pnote = preset_install(
-                        self.dsh_home(), bases, STRONG_INTRO + "\n\n" + persona, dry=True)
+                        self.dsh_home(), bases, STRONG_INTRO + "\n\n" + persona, dry=True,
+                        roots=self.desktop_roots(bases))
                     log("[预演] " + _pnote, "y" if _pok else "dg", "dsh")
                 except Exception as _pe:
                     log("破甲模式预演异常：%s" % _pe, "y", "dsh")
