@@ -3,7 +3,7 @@
 [![CI](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml)
 [![Build](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml)
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.6-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.51-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。
 > MIT 协议，**非官方**，与原作者无隶属关系；本项目按自己的节奏演进，不跟随上游成品。
 
@@ -397,7 +397,66 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 
 所以打补丁时会在 `managed-prompts/pojia-yijiantong/pristine/` 再存一份原档（附 `index.json` 记原路径）。`--revert` 先找旁路备份，找不到就吃保险库，日志会写「用专属保险库里的原档」。`--check` 里显示为 `原档保险库：N 份`。
 
-### 17. 与上游的差异
+### 17. Windows 命令行：Git Bash 接管（可选，默认关）
+
+**前因。** DSH 在 Windows 上把 bash 工具和 bash 执行器**一起**关掉了。证据在 `dsh-base/cordis.patch.yml`，四处平台开关两两成对：
+
+```yaml
+- id: bash-sandbox
+  name: '@deepseek-ai/dsh-bash-sandbox'
+  disabled: !!js process.platform === 'win32'
+- id: pwsh-sandbox
+  name: '@deepseek-ai/dsh-pwsh-sandbox'
+  disabled: !!js process.platform !== 'win32'
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+```
+
+于是模型在 Windows 上只拿得到 `pwsh` 工具。PowerShell 5.1 的引号规则对内联命令极不友好：反引号才是转义符、双引号里 `$` 会展开、没有 `&&` / `||`、`??` 和三元都不存在、here-string 的结束符必须顶格、`\"` 是 CMD 的规矩不是它的。模型一天要在这上面翻车几十次 —— 这就是「引号地狱」。
+
+**为什么"改一下 PATH"不管用。** 把四个开关翻过来只是第一步，真正卡住的是**解析**：`dsh-bash-local` 硬编码 `spawn(["bash", "-c", cmd])`，靠 PATH 找可执行文件；而 Windows 的 PATH 是「系统在前、用户在后」，`C:\Windows\System32\bash.exe`（WSL 入口）永远排在 Git 前面。改用户 PATH 没用，除非动系统 PATH —— 那要管理员权限，而且会影响整台机器。
+
+**做法。** 三件事：
+
+1. **找**一个能用的 Git Bash。候选按可信度排：`POJIA_GIT_BASH` → 本工具上次下的 → `Program Files\Git` → `Program Files (x86)\Git` → `LOCALAPPDATA\Programs\Git` → WorkBuddy 自带的 PortableGit（`CODEBUDDY_CODE_GIT_BASH_PATH`）→ scoop → PATH。**WSL 的 `bash.exe` 一律剔除**：`System32` 和 `WindowsApps` 下那两个会把 `/c/...` 当 Linux 路径，跑什么都是错的。判断不是看文件名，是真跑一次 `bash -c 'echo $BASH_VERSION;uname -s'`，`uname` 是 `Linux` 的直接判死。
+2. **没有就下一个**。镜像顺序 npmmirror → 清华 TUNA → GitHub，下 PortableGit 自解压包（`.7z.exe`），解到 `managed-prompts/pojia-yijiantong/gitbash/`。选便携版不是安装版：解压即用、不写注册表、不弹 UAC，卸载就是删目录。
+3. **接管**。往每个 profile 的 `cordis.patch.yml` 写一段带标记的 patch：
+
+```yaml
+- id: bash-sandbox
+  disabled: false
+- id: pwsh-sandbox
+  disabled: true
+- id: tool-bash
+  disabled: false
+- id: tool-pwsh
+  disabled: true
+- insert:
+    - id: pojia-gitbash
+      name: 'pojia-gitbash'
+      config:
+        exe: "C:\\Program Files\\Git\\bin\\bash.exe"
+```
+
+`- id: xxx` + 字段是 cordis 的**覆盖**语法（`cordis-plugin-include` 的 `applyEntryPatches`：按 id 找到已有条目，逐字段 `target[key] = value`），所以不用抄一遍官方那四行，宿主升级改了别的字段也不受影响。`pojia-gitbash` 是个十几行的插件，`apply` 时把 Git 的 `bin` 目录提到 `process.env.PATH` 最前 —— 子进程环境由 `dsh-subprocess-local` 从 `process.env` 合成，插件在启动阶段就跑完了，之后每次 spawn 都命中 Git Bash。
+
+> 参考 WorkBuddy 的解法（不照搬）：它自带 PortableGit，并用 `CODEBUDDY_CODE_GIT_BASH_PATH` 这个专用变量告诉上层 bash 在哪，绕开 PATH 顺序。DSH 没有这个变量，所以这里用「插件改 PATH」达到同样效果，并且优先复用 WB 那份 Git —— 用户机器上已经有一份能跑的 bash，没必要再下一份。
+
+**怎么用。** `--apply --target dsh --git-bash`，或者菜单里走到 DSH 时回答 `接管 Git Bash？(y/N)`；`--no-git-bash` 表示不改也不再问。装了破甲模式的话，预设里 `tool-bash` / `tool-pwsh` 的 `disabled` 也会一并翻过来 —— preset 的插件清单是**独立子树**（`dsh-agent-preset-registry` 的 `mountPreset`），不继承 base 顶层那份，两处都得改，只改一处就是「工具在、执行器不在」或反过来。
+
+**边界。**
+
+- 只影响 Windows；别的平台 `--git-bash` 是空操作。
+- 改的是宿主行为：打开后模型看到的是 `bash` 工具、写的是 bash 语法，跟之前完全不同。所以默认关，且交互里明说。
+- 需要**重启 DSH** 才生效（改的是磁盘配置，运行中的进程不会重读）。
+- 卸载：`--revert` 会按标记摘掉那一段、删掉插件目录；Git 本体不动（`gitbash/` 目录跟着专属目录一起删）。
+- 沙箱模式（`workspace-write`）在 Windows 上走的是 `dsh-sandbox-windows-acl`，这套 ACL 是围绕 pwsh 设计的。切到 Git Bash 后如果遇到权限类报错，先切回 `--no-git-bash` 对照一次，再判断是我们的问题还是沙箱的问题。
+
+### 18. 与上游的差异
 
 截至 2026-11-01，与上游最新公开文档逐条比对：
 
@@ -410,6 +469,7 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 | 安装目录发现 | Program Files / `LOCALAPPDATA` / 注册表 / 所有盘符 / 运行中进程 / npm | 同左，另加上面四条；且 DSH / ZCode 共用同一套发现 |
 | DSH `app.asar` 内插件 | 未见（只处理磁盘上散开的文件） | 解包到 `resources/app/` 再补，带完整性硬校验 |
 | DSH 0.2.1-rc.5 常量改名 | 未见 | 新旧五个 intro 常量名全认 |
+| Windows 默认命令工具 | 只有 PowerShell（bash 工具被平台条件禁用） | 可选 Git Bash 接管：自动找/下 Git Bash，工具与执行器一起切 |
 | 长上下文重复注入 | 未见 | 主块 + 独立镜像块，任一在位即可 |
 | Electron `OnlyLoadAppFromAsar` 保险丝 | 未见 | 自动探测并关闭，改前留备份 |
 | Trae 国内版 / 国际版 | 只认一个配置目录 | `~/.trae` / `~/.trae-cn` 双候选 |
@@ -428,7 +488,7 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 ## 六、校验
 
 ```
-536b9687f32eea8a3a343ab2e5f614e72cdb2ddb0ebe7fc2320f19fe590c29a6  src/破甲一键通.py           (446,614 B / LF)
+0839971a46ec0ac0482ffa1c07107c97d4034e2a778cad569cf63562f330ce68  src/破甲一键通.py           (471,254 B / LF)
 e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
@@ -442,7 +502,7 @@ git show 536ece2:破甲一键通.py | sha256sum
 
 `src/破甲一键通.py` 现在比 `upstream/` 大 40,681 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、打包适配）。
 
-版本号分两段存：`VERSION = "8.6"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.6-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
+版本号分两段存：`VERSION = "8.51"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.51-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
 ### 产物校验（两条独立通道）
 
