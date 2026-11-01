@@ -546,9 +546,28 @@ def now_stamp():
 
 # ---- 读写：保留 BOM 与原行尾（原 dsh_purge 用 text 模式写盘，会把 LF 变 CRLF，这里修掉）
 
+def _wp(path):
+    """Windows 长路径前缀（\\?\\）。路径超过 240 字符才加，够短就原样返回。
+
+    npm 全局装出来的靶点动辄
+    `...\\node_modules\\@deepseek-ai\\dsh\\node_modules\\@deepseek-ai\\dsh-agent-instructions\\lib\\index.js`，
+    再叠一层用户目录就顶到 MAX_PATH=260。超了之后 open() 直接抛
+    FileNotFoundError —— 报错信息看着像"文件不存在"，实际是路径太长，
+    很容易被当成"没装"而放过一整个靶点（本机 npm 嵌套布局实测踩到）。
+    """
+    if not IS_WIN or not path:
+        return path
+    p = os.path.abspath(path)
+    if len(p) < 240 or p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):                       # UNC：\\server\share -> \\?\UNC\server\share
+        return "\\\\?\\UNC\\" + p[2:]
+    return "\\\\?\\" + p
+
+
 def read_text(path):
     """返回 (文本, 是否有BOM)。二进制读入 -> 行尾原样保留。"""
-    with open(path, "rb") as f:
+    with open(_wp(path), "rb") as f:
         raw = f.read()
     if raw.startswith(b"\xef\xbb\xbf"):
         return raw[3:].decode("utf-8", "replace"), True
@@ -564,7 +583,7 @@ def read_text_safe(path):
     宁可不打这个补丁，也不要把用户的文件写坏。
     """
     try:
-        with open(path, "rb") as f:
+        with open(_wp(path), "rb") as f:
             raw = f.read()
     except Exception:
         return None
@@ -595,15 +614,15 @@ def _atomic_write(path, data):
     d = os.path.dirname(os.path.abspath(path)) or "."
     tmp = os.path.join(d, "~%s.pojia-tmp" % os.path.basename(path))
     try:
-        with open(tmp, "wb") as f:
+        with open(_wp(tmp), "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        os.replace(_wp(tmp), _wp(path))
         return True
     except Exception:
         try:
-            os.remove(tmp)
+            os.remove(_wp(tmp))
         except Exception:
             pass
         return False
@@ -2324,11 +2343,36 @@ class DshTarget:
                 # 备份：普通位置放 <file>.dshpurge.bak；DSH Desktop 的密封 bin 目录
                 # 不能出现陌生兄弟文件（会让桌面端拒绝启动），改存到 DSH_HOME 下。
                 if self.is_sealed_bin(os.path.dirname(fp)):
-                    backup_file(fp, bak_path=self.backup_path_for(fp), is_pristine=self.is_pristine)
+                    _bak = self.backup_path_for(fp)
+                    backup_file(fp, bak_path=_bak, is_pristine=self.is_pristine)
                 else:
+                    _bak = fp + self.bak_suffix
                     backup_file(fp, self.bak_suffix, is_pristine=self.is_pristine)
                 try:
                     write_text(fp, cur, bom=read_text(fp)[1])
+                    # v8.3-CE：写后自检。写完立刻回读，用同一套判据复核"目标态"到底成没成；
+                    # 不对就按备份回滚这份文件，绝不给用户留"报告打了、其实没生效"的半吊子状态。
+                    # 这是最容易砸口碑的一类坑：日志一片绿，重启后行为没变。
+                    _st2, _note2 = "ok", ""
+                    try:
+                        _st2, _note2 = self.file_state(fp, funcs, want)
+                    except Exception as _ve:
+                        _st2, _note2 = "error", "复核异常：%s" % _ve
+                    if _st2 in ("stale", "strict", "error"):
+                        try:
+                            if os.path.isfile(_bak):
+                                shutil.copy2(_bak, fp)
+                        except Exception as _re:
+                            log("  [!] 回滚也失败了：%s" % _re, "red", "dsh")
+                        stats["err"] += 1
+                        if fp in touched:
+                            touched.remove(fp)
+                        log("  [!] 写后自检没过，已回滚 %s —— %s"
+                            % (rel_display(fp, b), _note2), "red", "dsh")
+                        continue
+                    if _st2 == "other":
+                        log("  [?] 写入后是宽松态，但人格哈希来自别处；保留，建议加 --force 重跑 | %s"
+                            % rel_display(fp, b), "y", "dsh")
                     log("已打补丁 | %s  (%s)" % (rel_display(fp, b), ", ".join(applied)), "g", "dsh")
                     stats["fixed"] += 1
                     touched.append(fp)
