@@ -7,6 +7,12 @@
 本机网页 UI，零第三方依赖：只起一个 127.0.0.1 的 http.server，把按钮动作转成
 对核心脚本的命令行调用，再把它的输出原样流回页面。
 
+两种运行形态：
+  · 源码态 —— `python src/破甲GUI.py`，每个动作拉起 `python -u 破甲一键通.py …`。
+  · 打包态 —— 由单文件包里的 `--gui` 用 runpy 在核心进程内跑起来（本文件是打包时
+    塞进去的数据文件）。包里没有解释器，所以每个动作直接把**自己的 exe** 当命令行，
+    而 `--version` 这类要读源码的地方改成问自己一次。
+
 为什么用网页而不是 tkinter：
   · tkinter 的 ttk 主题在 Windows 上很难做出「现代极简」的观感 —— 圆角、阴影、
     过渡都要自己用 Canvas 画；网页这边几行 CSS 就够，而且天然支持深色终端区。
@@ -22,6 +28,7 @@
 用法：
     python src/破甲GUI.py            # 起界面并自动打开浏览器
     python src/破甲GUI.py --no-open  # 只起服务，自己开地址
+    pojia-ce.exe --gui               # 打包版（POJIA_GUI_NO_OPEN=1 可关掉自动开浏览器）
 """
 
 import json
@@ -35,18 +42,59 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.join(HERE, "破甲一键通.py")
+FROZEN = bool(getattr(sys, "frozen", False))
+if FROZEN:
+    # 冻结态的 __file__ 在 PyInstaller 的临时解包目录里（每次运行换一个、退出即删）。
+    # 可执行文件旁边的 persona.md / 状态/ 才是"用户看得见的那份"，一律以它为基准。
+    HERE = os.path.dirname(os.path.abspath(sys.executable))
+    CORE = ""                      # 包里没有 .py 可跑，动作走 exe 自己
+else:
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    CORE = os.path.join(HERE, "破甲一键通.py")
 IS_WIN = (os.name == "nt")
 TOKEN = secrets.token_urlsafe(18)
+_VER_CACHE = []
+
+
+def _spawn_flags():
+    """起子进程时的 creationflags：Windows 上别弹黑框。"""
+    if IS_WIN:
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return 0
+
+
+def _frozen_version():
+    """冻结态读不到核心源码，就问自己一句：`exe --version` 打的就是版本号。
+
+    起自己的进程要解一次包（约一秒），所以结果缓存住 —— 一次界面会话只问一遍。
+    """
+    if _VER_CACHE:
+        return _VER_CACHE[0]
+    ver = "?"
+    try:
+        r = subprocess.run(
+            [sys.executable, "--version"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=180, creationflags=_spawn_flags(),
+        )
+        txt = (r.stdout or b"").decode("utf-8", "replace")
+        m = re.search(r"(\d+\.\d+(?:-[A-Za-z0-9.]+)?)", txt)
+        if m:
+            ver = m.group(1)
+    except Exception:              # 版本号是显示用的，问不到就显示 ?，别把界面拖崩
+        pass
+    _VER_CACHE.append(ver)
+    return ver
 
 
 def core_version():
     """从核心脚本里读版本号，免得两边写死后对不上。
 
     核心脚本把「数字版本」和「社区版后缀」分开存（EDITION 不参与护照比对），
-    这里拼回对外展示的完整形态，例如 8.2-CE。
+    这里拼回对外展示的完整形态，例如 8.51-CE。冻结态没有源码可读，改问 exe。
     """
+    if FROZEN:
+        return _frozen_version()
     try:
         with open(CORE, "r", encoding="utf-8", errors="ignore") as f:
             txt = f.read()
@@ -92,7 +140,9 @@ ACTIONS = [
 
 
 def build_cmd(action, targets):
-    base = [sys.executable, "-u", CORE]
+    # 源码态：`python -u 核心.py …`，-u 让输出不攒缓冲，页面才像在实时跑。
+    # 打包态：exe 自己就是核心，直接拿自己当命令行 —— 包里没有 .py 可喂给解释器。
+    base = [sys.executable] if FROZEN else [sys.executable, "-u", CORE]
     t = ",".join(targets) if targets else "all"
     if action == "status":
         return base + ["--status", "--target", t]
@@ -608,14 +658,14 @@ class Handler(BaseHTTPRequestHandler):
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUNBUFFERED"] = "1"
-        flags = 0
-        if IS_WIN:
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # 源码态的 cwd 是仓库根（HERE 的上一层），相对路径按项目根算；打包态没有
+        # 「项目根」这回事，就落在 exe 旁边 —— 人格文件、状态目录都在那儿。
+        cwd = HERE if FROZEN else (os.path.dirname(HERE) or HERE)
         try:
             proc = subprocess.Popen(
-                cmd, cwd=os.path.dirname(HERE) or HERE, env=env,
+                cmd, cwd=cwd, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                bufsize=0, creationflags=flags,
+                bufsize=0, creationflags=_spawn_flags(),
             )
         except OSError as e:
             self.wfile.write(("启动失败：%s\n" % e).encode("utf-8"))
@@ -638,19 +688,23 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    if not os.path.isfile(CORE):
+    if not FROZEN and not os.path.isfile(CORE):
         print("找不到核心脚本：%s" % CORE)
         return 1
     host = "127.0.0.1"
     srv = ThreadingHTTPServer((host, 0), Handler)
     port = srv.server_address[1]
     url = "http://%s:%d/?t=%s" % (host, port, TOKEN)
-    print("=" * 66)
-    print(" 破甲一键通 · 图形界面   v%s" % core_version())
-    print(" 地址：%s" % url)
-    print(" 关闭窗口或按 Ctrl+C 退出")
-    print("=" * 66)
-    if "--no-open" not in sys.argv:
+    # flush=True：打包态的启动脚本/CI 靠读这几行判断「界面起来了」，不刷就卡在缓冲里。
+    print("=" * 66, flush=True)
+    print(" 破甲一键通 · 图形界面   v%s%s"
+          % (core_version(), "（打包版）" if FROZEN else ""), flush=True)
+    print(" 地址：%s" % url, flush=True)
+    print(" 关闭窗口或按 Ctrl+C 退出", flush=True)
+    print("=" * 66, flush=True)
+    # 关掉自动开浏览器：--no-open（源码态），或 POJIA_GUI_NO_OPEN=1（打包态没地方塞参数）
+    quiet_open = ("--no-open" in sys.argv) or os.environ.get("POJIA_GUI_NO_OPEN")
+    if not quiet_open:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
         srv.serve_forever()

@@ -17,6 +17,8 @@ env:
   # 固定版本：换 PyInstaller 版本会改变产物行为（引导器、onefile 解包方式），
   # 出问题时要能确定是"代码改了"还是"打包器变了"。
   PYINSTALLER_VERSION: "6.16.0"
+  # Cython 也钉版本：它生成的 C 代码随版本变，同一个 .py 换个 Cython 就可能编译不过。
+  CYTHON_VERSION: "3.1.4"
   BIN_NAME: pojia-ce
 
 jobs:
@@ -51,24 +53,21 @@ jobs:
         with:
           python-version: ${{ matrix.py }}
 
-      - name: 安装 PyInstaller
+      - name: 安装打包工具
         run: |
           python -m pip install --upgrade pip
           python -m pip install "pyinstaller==${{ env.PYINSTALLER_VERSION }}"
+          # Cython 装不上不该让发布变红 —— tools/build_exe.py 会自动退回纯源码打包。
+          python -m pip install "cython==${{ env.CYTHON_VERSION }}" || echo "::warning::Cython 装不上，本次产物走纯源码打包"
 
       - name: 打包
         shell: bash
         run: |
           # 构建产物全部落在 build/ 下（已 gitignore），仓库根目录保持干净。
-          # specpath 必须和脚本同盘：PyInstaller 会用 relpath 算相对路径，
-          # 跨盘符直接 ValueError（本机踩过，J: 源码 + C: 临时目录）。
-          python -m PyInstaller \
-            --onefile --clean --noconfirm \
-            --name "$BIN_NAME" \
-            --distpath build/dist \
-            --workpath build/work \
-            --specpath build \
-            src/破甲一键通.py
+          # 具体参数在 tools/build_exe.py 里 —— --add-data 的分隔符（Windows ; / POSIX :）
+          # 和 Cython 那几步都不适合写在 YAML 里。specpath 必须和源码同盘：PyInstaller
+          # 用 relpath 算相对路径，跨盘符直接 ValueError（本机踩过）。
+          python tools/build_exe.py --name "$BIN_NAME"
           ls -lh "build/dist/$BIN_NAME${{ matrix.ext }}"
 
       - name: 签名（Windows，配了证书才签）
@@ -136,6 +135,13 @@ jobs:
           assert r2.returncode == 0, "--help failed: %r" % (r2.stderr,)
           assert "kiro" in r2.stdout, "--help 里没列出 kiro"
           print("smoke OK, size=%d bytes" % os.path.getsize(exe))
+
+      - name: 冒烟：图形界面能起来
+        shell: bash
+        run: |
+          # --version / --status 全绿也不代表 GUI 在包里：它是 runpy 从数据文件跑的，
+          # 漏了 --add-data 只有敲 --gui 那一刻才炸。这一步真起服务、真点一次动作。
+          python tools/gui_smoke.py "build/dist/$BIN_NAME${{ matrix.ext }}"
 
       - name: 改名
         shell: bash

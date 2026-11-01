@@ -150,6 +150,38 @@ def test_codesign_private_key_never_committed():
     assert not bad, "工作区里出现了私钥文件：%s" % bad
 
 
+LICENSE_SHA = "cf1e09ddd43b7d9927ee4298f4a87b1d6c0a06b33281612e1d86137055fd4d3c"
+
+
+def test_license_is_upstream_original():
+    """LICENSE 必须逐字节保持上游原文。
+
+    这是 MIT 唯一的硬性条件（保留版权声明与许可声明），也是 README §八 对外
+    承诺过的事。要改它 —— 比如往后追加我方版权行 —— 先改这里的期望值，并在
+    README 里说明理由，别顺手改了就推。
+    """
+    assert sha256(os.path.join(ROOT, "LICENSE")) == LICENSE_SHA
+
+
+def test_only_one_mit_license_file():
+    """仓库里只许有一份 MIT 正文。
+
+    再放一个 LICENSE-CE / LICENSE-ADDITIONS，GitHub 的许可证识别和各种扫描器
+    会判成「双许可 / 冲突」，比不写还含糊。归属与范围写进 NOTICE。
+    """
+    names = sorted(n for n in os.listdir(ROOT) if n.upper().startswith("LICENSE"))
+    assert names == ["LICENSE"], "多出来的许可证文件：%s" % names
+
+
+def test_notice_covers_both_parties():
+    """NOTICE 必须把「上游的」和「本仓库的」都写清楚，缺一边就等于没写。"""
+    with open(os.path.join(ROOT, "NOTICE"), encoding="utf-8") as f:
+        txt = f.read()
+    for needle in ("z91772524-ai", "Mladery", "536ece2", "MIT"):
+        assert needle in txt, "NOTICE 里没提 %s" % needle
+    assert "不是第二份许可" in txt, "NOTICE 得说清楚它不是第二份许可"
+
+
 def test_ps1_scripts_have_bom():
     """tools/ 下的 .ps1 必须是 UTF-8 **带 BOM**。
 

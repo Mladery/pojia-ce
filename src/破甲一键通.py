@@ -213,7 +213,7 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess.Popen = _popen_no_window
     subprocess._dsh_no_window_patched = True
 
-VERSION = "8.51"
+VERSION = "8.52"
 # 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
 # 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
 # "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。
@@ -9750,15 +9750,48 @@ def build_parser():
     return p
 
 
+def _gui_source_path():
+    """找图形界面的源码文件。
+
+    源码态：和本脚本同目录。冻结态：打包时 `破甲GUI.py` 是当**数据文件**塞进包里
+    的（PyInstaller 的 `--add-data`），解包后落在 `sys._MEIPASS` 下 —— onefile 的
+    临时目录，进程活着期间一直在。
+    """
+    cands = []
+    _mp = getattr(sys, "_MEIPASS", "")
+    if _mp:
+        cands.append(os.path.join(_mp, "破甲GUI.py"))
+    cands.append(os.path.join(HERE, "破甲GUI.py"))
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
 def _launch_gui():
-    """起图形界面：把同目录的 破甲GUI.py 作为独立进程拉起。"""
-    if getattr(sys, "frozen", False):
-        say("  打包版不含图形界面 —— GUI 要起一个 Python 进程来跑，单文件包里没有。", "y")
-        say("  要图形界面请从源码运行：python src/破甲GUI.py", "y")
-        return
-    gui = os.path.join(HERE, "破甲GUI.py")
-    if not os.path.isfile(gui):
+    """起图形界面。
+
+    源码态：把同目录的 破甲GUI.py 当**独立进程**拉起 —— GUI 崩了不牵连主程序。
+
+    冻结态：包里没有解释器可拉，改用 runpy 在**当前进程**里跑。为什么不重新拉一个
+    自己的 exe？单文件包每次启动都要把 11 MB 解开一遍（约一秒），而 GUI 本来就要
+    占住主线程直到用户关窗口，多起一个进程纯属白等。
+    """
+    gui = _gui_source_path()
+    if not gui:
         say("  找不到 破甲GUI.py，图形界面不可用。", "red")
+        if getattr(sys, "frozen", False):
+            say("  这个产物打包时没带图形界面（构建漏了 --add-data），换个官方产物。", "y")
+        return
+    if getattr(sys, "frozen", False):
+        import runpy
+        say("  已启动图形界面，浏览器会自动打开；关掉窗口或按 Ctrl+C 即退出。", "g")
+        try:
+            runpy.run_path(gui, run_name="__main__")
+        except SystemExit:                       # GUI 正常退出走的就是这条
+            pass
+        except Exception as e:
+            say("  图形界面异常退出：%s" % e, "red")
         return
     try:
         subprocess.Popen([sys.executable, gui], cwd=os.path.dirname(gui))

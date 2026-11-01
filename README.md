@@ -3,7 +3,7 @@
 [![CI](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml)
 [![Build](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml)
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.51-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.52-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。
 > MIT 协议，**非官方**，与原作者无隶属关系；本项目按自己的节奏演进，不跟随上游成品。
 
@@ -59,6 +59,7 @@ python src/破甲一键通.py --apply --target dsh --dsh-mode preset   # DSH 破
 python src/破甲一键通.py --apply --target dsh --git-bash          # Windows：默认命令工具换成 Git Bash（默认关）
 python src/破甲一键通.py --clean-spill --target wb   # 清过期的会话快照
 python src/破甲一键通.py --revert --target wb
+pojia-ce.exe --gui                           # 打包版的图形界面（下载后直接用，不用装 Python）
 ```
 
 所有原始开关（`--apply` / `--revert` / `--persona` / `--guard` / `--snapshot` / `--pick`）都保留。先 `--dry-run`，再动手。
@@ -86,7 +87,7 @@ python src/破甲一键通.py --revert --target wb
 
 - **macOS 首次运行会被 Gatekeeper 拦**（未签名）。解掉隔离标记即可：`xattr -d com.apple.quarantine ./pojia-ce-macos-arm64`。
 - **Windows Defender 可能对单文件 exe 报毒** —— PyInstaller 的引导器是常见误报对象。签名（见 [CHANGELOG 的 v8.5-CE](CHANGELOG.md#v85-ce-2026-11-01)）能让属性页显示发布者、本机少挨一次拦截，但**改变不了别人机器上的判断**。要绝对干净就用源码跑，或者自己 `python -m PyInstaller` 打一份。
-- 打包版**不含图形界面**：GUI 要起一个 Python 进程，单文件包里没有解释器。要 GUI 请从源码跑 `python src/破甲GUI.py`。
+- **打包版含图形界面**：`pojia-ce.exe --gui`。界面是打进包里的数据文件，由核心用 runpy 在**进程内**拉起（包里没有解释器可拉第二个进程）；页面里每个动作把 exe 自己当子进程跑，输出照样实时流回页面。不想让它自动开浏览器就设 `POJIA_GUI_NO_OPEN=1`。
 
 ---
 
@@ -106,6 +107,7 @@ python src/破甲一键通.py --revert --target wb
 
 | 版本 | 主题 |
 |---|---|
+| [`v8.52-CE`](CHANGELOG.md#v852-ce-2026-11-01) | 打包版带 GUI / Cython 预编译 / 构建收进 `tools/` / 许可归属 |
 | [`v8.51-CE`](CHANGELOG.md#v851-ce-2026-11-01) | Git Bash 接管 / DSH 破甲模式 / 运行时守卫 / 还原彻底化 |
 | [`v8.5-CE`](CHANGELOG.md#v85-ce-2026-11-01) | 自动化测试与 CI / 四平台可执行文件 / Windows 代码签名 |
 | [`v8.4-CE`](CHANGELOG.md#v84-ce-2026-11-01) | `kiro` 目标 / 补齐十个 `--<key>-dir` 参数 |
@@ -158,8 +160,8 @@ python src/破甲一键通.py --revert --target wb
 ## 六、校验
 
 ```
-1c44f646538e23cc2cfb457758c10ef7fe6277753a3b03204690561c33b04931  src/破甲一键通.py           (475,298 B / LF)
-e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
+c635e4ecb6aadd485d7db395c8400df9fb66939a2d8df7727a355ab6d8daf8e9  src/破甲一键通.py           (476,579 B / LF)
+e380390e03a0eee1b4a68e8f9bbee055c613ff01b14b153b0fe4d59a974040be  src/破甲GUI.py              (26,642 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
 
@@ -170,9 +172,9 @@ git clone https://github.com/z91772524-ai/pojia-next && cd pojia-next
 git show 536ece2:破甲一键通.py | sha256sum
 ```
 
-`src/破甲一键通.py` 现在比 `upstream/` 大 40,681 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 v8.2 之后的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、破甲模式、守卫、Git Bash 接管、打包适配），逐条见 [CHANGELOG](CHANGELOG.md)。
+`src/破甲一键通.py` 现在比 `upstream/` 大 125,186 B —— §四 的「只删不加」说的是摘封条那一步（净减）；多出来的字节来自 v8.2 之后的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、破甲模式、守卫、Git Bash 接管、打包适配），逐条见 [CHANGELOG](CHANGELOG.md)。
 
-版本号分两段存：`VERSION = "8.51"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.51-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
+版本号分两段存：`VERSION = "8.52"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.52-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
 ### 产物校验（两条独立通道）
 
@@ -212,6 +214,7 @@ Linux / macOS 的产物没有签名（`codesign` / `gpg` 那套要另外的证�
 
 ```
 LICENSE                        上游 MIT 原文，未改动（Copyright (c) 2026 z91772524-ai）
+NOTICE                         归属说明：哪部分是上游的、哪部分是本仓库的
 README.md                      本文件：工具说明与索引
 CHANGELOG.md                   更新日志：逐版改动、实现细节、踩过的坑
 src/破甲一键通.py               纯净版核心：摘掉 16 个加密封条函数，可直接跑
@@ -244,8 +247,9 @@ python -m pytest tests -q
 
 ## 八、许可、独立性与免责
 
-- 全部代码来自上游 `z91772524-ai/pojia-next`，版权归原作者，按 **MIT License** 使用与再分发。`LICENSE` 保留上游原文未改 —— 这是 MIT 唯一的硬性条件。本仓库自身的改动同样以 MIT 发布，不主张对原作的额外权利。
-- **独立维护，不是上游的分支跟踪者。** 代码来源仅两份：`536ece2` 的快照与在此之上摘除封条的净化版。上游此后的一切成品（exe / 激活码 / 云控）与本仓库无任何代码或分发关系；本项目不追其版本号，不合并其后续提交。
+- **代码分两部分，授权一致，边界写在 [NOTICE](NOTICE) 里。** `upstream/` 的快照与 `src/` 里摘掉封条后保留下来的那部分来自上游 `z91772524-ai/pojia-next`（提交 `536ece2`），版权归原作者，按 **MIT License** 使用与再分发 —— `LICENSE` 保留上游原文未改，这是 MIT 唯一的硬性条件。**本仓库新增与重写的部分**（`wbintl` / `kiro` 目标、四源定位链、镜像层、DSH 破甲模式与运行时守卫、Git Bash 接管、`--gui` 网页界面、测试、打包与签名工具）版权归 **Mladery**（本仓库维护者），同样以 MIT 发布。两部分合起来仍是 MIT，不额外附加限制。
+  - 只放**一份** MIT 正文（`LICENSE`），不另起第二份：多一个 LICENSE 文件会让 GitHub 的许可证识别和各种扫描器判成「双许可 / 冲突」，比不写还含糊。归属与范围单独写进 [NOTICE](NOTICE)。
+- **独立维护，不是上游的分支跟踪者。** 起点只有 `536ece2` 那份快照；此后 `src/` 的每一次改动都是本项目自己写的（逐版记录见 [CHANGELOG](CHANGELOG.md)）。上游此后的一切成品（exe / 激活码 / 云控）与本仓库无任何代码或分发关系；本项目不追其版本号，不合并其后续提交。
 - **名字上也不攀附。** 仓库原名 `pojia-next` 与上游同名，容易被读成「上游的正统续作」，现已改为 `pojia-ce`；版本号带 `-CE` 后缀，一眼看出是社区分支而不是官方版本。工具本身仍叫「破甲一键通」—— 那是对上游那个工具的描述性称呼，改名会让老用户找不到东西。
 - 鸣谢 `z91772524-ai` 及全部上游贡献者 —— 没有那份公开源码就没有这个仓库。鸣谢是 MIT 授权事实下的礼节，不构成对上游后续任何做法的认可。
 - 与 `z91772524-ai` 无隶属关系，不代表其立场，不分发其成品 exe，不代办激活码。代码按「现状」提供，无任何担保；用途自负，请遵守所在地法律法规与目标软件的服务条款。
