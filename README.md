@@ -329,7 +329,7 @@ profiles/desktop/cordis.patch.yml      追加一条 insert
 profiles/desktop/package.json          dependencies 登记 file: 依赖
 ```
 
-`--revert` 会一起撤掉（补丁还原了、会话里还在自动续命，行为就对不上账了）。`--status` 会报「已就位 / 半安装 / 未安装」，半安装直接重跑 `--apply` 修。改之前留 `.pojia-guard.bak`。
+`--revert` 会一起撤掉（补丁还原了、会话里还在自动续命，行为就对不上账了）。`--check` 会报「已就位 / 半安装 / 未安装」，半安装直接重跑 `--apply` 修。改之前留 `.pojia-guard.bak`。
 
 插件本身零依赖、纯 ESM，只做上面那张表里的事；没有网络请求，不读用户内容，不写任何文件。
 
