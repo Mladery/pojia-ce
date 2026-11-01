@@ -3,7 +3,7 @@
 [![CI](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml)
 [![Build](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml)
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.5-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.6-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。
 > MIT 协议，**非官方**，与原作者无隶属关系；本项目按自己的节奏演进，不跟随上游成品。
 
@@ -305,7 +305,35 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 
 CI 签完会直接调 `tools/verify-windows.ps1` 复验一遍。这一步不只是确认签上了，还在**核对两个来源**：secret 里的 pfx 和仓库钉的公钥证书必须是同一张。哪天证书轮换了却忘了同步 `tools/codesign/`，构建当场红，而不是等到用户验签失败才发现。
 
-### 14. 与上游的差异
+### 14. DSH 运行时守卫（拒答续命 / 异常续跑）
+
+人格块是**磁盘层**：会话一开始读进去，中途就不再看。模型聊到一半突然「抱歉，我不能…」，人格块一点办法没有 —— 它不在那条路上。
+
+这层补的就是那段空白。`--apply --target dsh` 会顺带装一个 Cordis 插件 `pojia-ce-guard` 进 DSH 桌面版，挂在 `agent/status` 上：
+
+| 触发 | 动作 |
+|---|---|
+| 一轮**正常**收尾，但可见回复是拒答话术 | 补一句「继续把上一件事做完」，接着交付 |
+| 一轮**异常**收尾（`error` / `max-tokens` / `aborted`） | 补一句「继续」 |
+| 用户自己按了停止、或刚发过话 | **不动** —— 方向盘在真人手上 |
+| 上一轮回复是自证口令回执 / 封条告警 | **不动** —— 那是我们自己的话术，不是拒答 |
+| 配额、鉴权、上下文超限这类错误码 | **不补** —— 补了也是白烧次数 |
+
+上限：每轮拒答最多补 2 次、整会话有熔断；续跑每个会话最多 3 次，真人一说话就清零。
+
+装的时候落三处，都能还原：
+
+```
+profiles/desktop/node_modules/pojia-ce-guard/{package.json,index.js}
+profiles/desktop/cordis.patch.yml      追加一条 insert
+profiles/desktop/package.json          dependencies 登记 file: 依赖
+```
+
+`--revert` 会一起撤掉（补丁还原了、会话里还在自动续命，行为就对不上账了）。`--status` 会报「已就位 / 半安装 / 未安装」，半安装直接重跑 `--apply` 修。改之前留 `.pojia-guard.bak`。
+
+插件本身零依赖、纯 ESM，只做上面那张表里的事；没有网络请求，不读用户内容，不写任何文件。
+
+### 15. 与上游的差异
 
 截至 2026-11-01，与上游最新公开文档逐条比对：
 
@@ -336,7 +364,7 @@ CI 签完会直接调 `tools/verify-windows.ps1` 复验一遍。这一步不只�
 ## 六、校验
 
 ```
-b87ecf13d4af148e1fb527b2ec6a34323feda9e72508570b19b259d418cdaf01  src/破甲一键通.py           (392,074 B / LF)
+6f630e6c7f95ddf48cca0b10662d27c118065eaeed63d8aef64916d54728f9b0  src/破甲一键通.py           (413,774 B / LF)
 e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
@@ -350,7 +378,7 @@ git show 536ece2:破甲一键通.py | sha256sum
 
 `src/破甲一键通.py` 现在比 `upstream/` 大 40,681 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、打包适配）。
 
-版本号分两段存：`VERSION = "8.5"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.5-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
+版本号分两段存：`VERSION = "8.6"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.6-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
 ### 产物校验（两条独立通道）
 
