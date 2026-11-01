@@ -40,10 +40,16 @@ SETUP_TMPL = '''\
 from setuptools import Extension, setup
 from Cython.Build import cythonize
 
+ext = Extension(
+    "%(mod)s", ["%(mod)s.py"],
+    extra_compile_args=%(cflags)s,
+    extra_link_args=%(ldflags)s,
+)
+
 setup(
     name="%(mod)s",
     ext_modules=cythonize(
-        [Extension("%(mod)s", ["%(mod)s.py"])],
+        [ext],
         language_level=3,
         # binding=True：编译出来的 cyfunction 保留 __name__ / __doc__ / 关键字参数，
         # 核心里有 fn.__name__ 这种用法（按函数名报「打了哪几处」），不保留就 AttributeError。
@@ -133,8 +139,15 @@ def compile_core(workdir, mod="pojia_core"):
     shutil.copyfile(CORE, py)
 
     setup_py = os.path.join(workdir, "setup_%s.py" % mod)
+    # 编译选项按平台给：gcc / clang 默认带 -g，编出来的 .so 里塞满调试信息 ——
+    # Linux 产物因此从 21 MB 涨到 33 MB（同一份代码，Windows 只涨 1 MB）。
+    # -g0 不生成调试信息，-s 链接时顺手 strip。MSVC 不认这两个开关，Windows 不给。
+    if os.name == "nt":
+        cflags, ldflags = "[]", "[]"
+    else:
+        cflags, ldflags = '["-g0", "-O2"]', '["-s"]'
     with open(setup_py, "w", encoding="utf-8") as f:
-        f.write(SETUP_TMPL % {"mod": mod})
+        f.write(SETUP_TMPL % {"mod": mod, "cflags": cflags, "ldflags": ldflags})
 
     log("cythonize + build_ext（%s）" % mod)
     r = subprocess.run([sys.executable, setup_py, "build_ext", "--inplace"],

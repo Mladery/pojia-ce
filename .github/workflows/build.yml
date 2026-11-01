@@ -188,6 +188,13 @@ jobs:
           # 只会看到一个空页面，以为发布挂了。发布过的再 edit 一次是无害的。
           gh release edit "$TAG" --draft=false
 
+          # 发布说明跟着仓库走：Release 早于说明改动的（比如先发后补），重跑一次
+          # 就同步过来，不用手动去网页上贴。
+          NOTES="docs/release-notes/$TAG.md"
+          if [ -f "$NOTES" ]; then
+            gh release edit "$TAG" --notes-file "$NOTES"
+          fi
+
   # 四个平台的产物汇总成一份校验和。Windows 走签名验签，另外三个平台只有
   # SHA-256 这一条路 —— 所以这份文件是它们唯一的完整性凭据。
   checksums:
