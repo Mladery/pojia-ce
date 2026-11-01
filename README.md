@@ -1,8 +1,9 @@
 # 破甲一键通 · 社区版（Community Edition）
 
 [![CI](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml)
+[![Build](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml)
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.4-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.5-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。
 > MIT 协议，**非官方**，与原作者无隶属关系；本项目按自己的节奏演进，不跟随上游成品。
 
@@ -57,6 +58,31 @@ python src/破甲一键通.py --revert --target wb
 ```
 
 所有原始开关（`--apply` / `--revert` / `--persona` / `--guard` / `--snapshot` / `--pick`）都保留。先 `--dry-run`，再动手。
+
+### 免安装：直接下可执行文件
+
+不想装 Python 就用打包版 —— CI 每次推 `main` 都会打一遍，打 tag 时自动发 Release：
+
+| 平台 | 文件 |
+|---|---|
+| Windows x64 | `pojia-ce-windows-x64.exe` |
+| Linux x64 | `pojia-ce-linux-x64` |
+| macOS Intel | `pojia-ce-macos-x64` |
+| macOS Apple Silicon | `pojia-ce-macos-arm64` |
+
+在 [Actions](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml) 里点最新一次运行，页面底部 Artifacts 就能下；打了 tag 的版本在 [Releases](https://github.com/Mladery/pojia-ce/releases) 里。
+
+用法和脚本一模一样，把 `python 破甲一键通.py` 换成可执行文件即可。行为也一致：
+
+- `persona.md` 放在可执行文件**旁边**就会被读到；
+- `状态/`（手动记住的目录）和 `破甲日志.txt` 也落在它旁边，不会写进临时目录；
+- Windows 的守护任务会直接指向这个 exe，不再拼 `pythonw.exe`。
+
+三点要提前说：
+
+- **macOS 首次运行会被 Gatekeeper 拦**（未签名）。解掉隔离标记即可：`xattr -d com.apple.quarantine ./pojia-ce-macos-arm64`。
+- **Windows Defender 可能对单文件 exe 报毒** —— PyInstaller 的引导器是常见误报对象。要绝对干净就用源码跑，或者自己 `python -m PyInstaller` 打一份。
+- 打包版**不含图形界面**：GUI 要起一个 Python 进程，单文件包里没有解释器。要 GUI 请从源码跑 `python src/破甲GUI.py`。
 
 ---
 
@@ -219,7 +245,27 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 
 全部用例只在临时目录里操作，不碰真实 `~`，也不要求装了任何客户端，所以干净机器和 CI 上都能跑完。
 
-### 12. 与上游的差异
+### 12. 打包成免安装的可执行文件
+
+脚本零依赖，但"先装 Python"这一步劝退的人比想象中多。CI 现在顺手打四种产物：Windows x64、Linux x64、macOS Intel、macOS Apple Silicon，推 `main` 出 artifact，打 tag 发 Release。
+
+打包本身是一行 PyInstaller，真正要改的是**脚本里三处默认按源码目录假设的地方** —— 不改的话打出来的 exe 能用，但用起来处处别扭：
+
+| 位置 | 源码态 | 冻结态（`sys.frozen`） |
+|---|---|---|
+| `HERE` / `SELF` | `__file__` 所在目录 | 可执行文件所在目录 |
+| `check_runtime()` 的标准库自检 | 逐个 `importlib` 试一遍 | 直接跳过 |
+| 守护任务的 `/TR` | `"pythonw.exe" "脚本.py" --quiet` | `"pojia-ce.exe" --quiet` |
+
+第一条最要命：onefile 模式下 `__file__` 指向每次运行都换一个、退出即删的临时解包目录。人格文件、`状态/`、日志要是都落在那儿，等于什么都没存 —— 用户放个 `persona.md` 在 exe 旁边，程序永远读不到。现在冻结态统一取 `sys.executable` 的目录，行为跟直接跑脚本一致。
+
+第二条是个反直觉的坑：`check_runtime()` 用 `importlib.import_module("platform")` 按**字符串**导入，PyInstaller 的静态分析看不见，`platform` 就不会被打进包 —— 结果打出来的 exe 一启动就自己报"标准库不完整"。冻结态里标准库是打进包的，这个自检本来就没有意义，直接跳过。
+
+第三条：冻结态没有解释器可写进 `<Command>`，再拼一个 `pythonw.exe` 只会让任务指向不存在的文件 —— 注册成功、一次也跑不起来，正好是 `task_wellformed()` 要抓的那种静默失败。
+
+打包命令里还有个跨盘符的坑：`--specpath` 必须和源码同盘，PyInstaller 内部用 `relpath` 算相对路径，`J:` 的源码配 `C:` 的临时目录直接 `ValueError`。
+
+### 13. 与上游的差异
 
 截至 2026-11-01，与上游最新公开文档逐条比对：
 
@@ -239,6 +285,8 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 | `--<key>-dir` 手动指定 | 未见 | 按目标表兜底注册，加目标自动就有 |
 | 写后自检 | 未见 | 回读复核，不合格即按备份回滚 |
 | Windows 长路径 | 未见 | 超过 240 字符自动加 `\\?\` 前缀 |
+| 免安装可执行文件 | 只有 Windows exe（且带封条/激活码） | Windows / Linux / macOS 四平台，CI 自动出 |
+| 打包版的行为一致性 | — | 人格文件、状态目录、日志都跟着可执行文件走 |
 | 目标数量 | 15 | 17 |
 
 > 保留意见：上游自 v8.14 起不再公开源码，上表依据其 README 与更新日志比对，「未见」只代表文档未声明，不等于其代码中一定没有。安装目录发现一项上游明确是有的，差异在「猜固定目录名」与「按盘符 × 深度实找」之间。
@@ -248,7 +296,7 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 ## 六、校验
 
 ```
-1c8579a9c5fc7a375cd090b14fe1cc97472c86a479cc5d89416e5337cd59d774  src/破甲一键通.py           (390,298 B / LF)
+b87ecf13d4af148e1fb527b2ec6a34323feda9e72508570b19b259d418cdaf01  src/破甲一键通.py           (392,074 B / LF)
 e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
@@ -260,9 +308,9 @@ git clone https://github.com/z91772524-ai/pojia-next && cd pojia-next
 git show 536ece2:破甲一键通.py | sha256sum
 ```
 
-`src/破甲一键通.py` 现在比 `upstream/` 大 38,905 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标）。
+`src/破甲一键通.py` 现在比 `upstream/` 大 40,681 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、打包适配）。
 
-版本号分两段存：`VERSION = "8.4"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.4-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
+版本号分两段存：`VERSION = "8.5"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.5-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
 ---
 
@@ -275,6 +323,7 @@ src/破甲GUI.py                  图形界面：本机网页 UI，零依赖
 upstream/破甲一键通.v8.14.py    上游 536ece2 的原始核心，未改动，用于比对
 tests/                         测试：标记块往返 / 保险丝 / 目标注册表 / 命令行冒烟
 .github/workflows/ci.yml       CI：三平台 × 多 Python 版本跑一遍
+.github/workflows/build.yml    Build：四个平台打单文件可执行文件，打 tag 发 Release
 evidence/                      取证材料：提交时间线、群聊记录、防二改机制拆解
 ```
 

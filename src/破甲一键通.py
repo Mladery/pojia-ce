@@ -162,6 +162,10 @@ IS_WIN = (os.name == "nt")
 #  那些 .pyc 里含**解密后的原文**，等于把加密保护整个绕开 —— 只删自己名字的缓存，
 #  不动别人的、不动目录本身，失败一律静默（这是加固，不能反过来弄坏运行）。
 def _purge_pycache():
+    # 冻结态没有源码目录、也没有 __pycache__，这段纯属白跑（而且 __file__ 指向
+    # 临时解包目录），直接跳过。
+    if getattr(sys, "frozen", False):
+        return
     try:
         _here = os.path.dirname(os.path.abspath(__file__))
         _cache = os.path.join(_here, "__pycache__")
@@ -208,7 +212,7 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess.Popen = _popen_no_window
     subprocess._dsh_no_window_patched = True
 
-VERSION = "8.4"
+VERSION = "8.5"
 # 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
 # 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
 # "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。
@@ -217,8 +221,16 @@ VER_TAG = VERSION + "-" + EDITION
 CHECK_EXIT_CODES = []          # --check 用：收集不达标项（只影响退出码，不改状态码）
 ERRORS = 0                     # v7.4：apply/revert 里的失败项累计（>0 → 进程退出码 1）
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SELF = os.path.abspath(__file__)
+# 打包成单文件可执行文件之后，`__file__` 指向 PyInstaller 解包出来的临时目录 ——
+# 那里每次运行换一个、退出即删。人格文件、状态目录、日志、手动记住的目录要是都
+# 落在那儿，等于什么都没存。冻结态改用**可执行文件自己所在的目录**，行为和直接
+# 跑脚本完全一致：persona.md 放旁边就认，状态/ 和日志也落在旁边。
+if getattr(sys, "frozen", False):
+    SELF = os.path.abspath(sys.executable)
+    HERE = os.path.dirname(SELF)
+else:
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    SELF = os.path.abspath(__file__)
 STATE_DIR = os.path.join(HERE, "状态")
 HIST_DIR = os.path.join(HERE, "历史备份")
 LOG_PATH = os.path.join(HERE, "破甲日志.txt")
@@ -3768,10 +3780,17 @@ class WorkBuddyTarget:
         return cand if os.path.isfile(cand) else exe
 
     def install_guard_tasks(self, admin):
-        py = self._pick_quiet_python()
-        # /TR 的值本身要带内层引号（路径可能有空格）；作为**单个 argv 元素**传给 schtasks，
-        # 由 subprocess 在 Windows 上按 argv 规则转义，schtasks 收到的是 `"py" "脚本" --quiet`。
-        tr = '"%s" "%s" --quiet --target %s' % (py, SELF, GUARD_TARGETS)
+        # 冻结态（单文件可执行文件）没有解释器可以写进 <Command>：可执行文件自己
+        # 就是入口，再拼一个 pythonw.exe 只会让任务指向一个不存在的文件 —— 任务
+        # 注册成功、一次也跑不起来，正是 task_wellformed 要抓的那种静默失败。
+        if getattr(sys, "frozen", False):
+            py = ""
+            tr = '"%s" --quiet --target %s' % (SELF, GUARD_TARGETS)
+        else:
+            py = self._pick_quiet_python()
+            # /TR 的值本身要带内层引号（路径可能有空格）；作为**单个 argv 元素**传给
+            # schtasks，由 subprocess 在 Windows 上按 argv 规则转义。
+            tr = '"%s" "%s" --quiet --target %s' % (py, SELF, GUARD_TARGETS)
         _m1, _rc1 = _run(["schtasks", "/Create", "/TN", TASK_HOURLY, "/SC", "MINUTE", "/MO", "30",
                           "/TR", tr, "/F"])
         argv2 = ["schtasks", "/Create", "/TN", TASK_LOGON, "/SC", "ONLOGON", "/TR", tr, "/F"]
@@ -7678,6 +7697,11 @@ def check_runtime():
         except Exception:
             pass
         sys.exit(1)
+    # 冻结态（单文件可执行文件）里标准库是打进包里的，没有"用户 Python 装残了"
+    # 这回事；而且下面用 importlib 按名字动态导入，PyInstaller 静态分析看不见，
+    # 会把 platform 之类的模块漏掉 —— 真跑起来就误报"标准库不完整"。
+    if getattr(sys, "frozen", False):
+        return
     missing = []
     for mod in ("os", "re", "sys", "json", "shutil", "hashlib", "subprocess",
                 "argparse", "datetime", "unicodedata", "string", "platform"):
@@ -7779,7 +7803,11 @@ def build_parser():
 
 def _launch_gui():
     """起图形界面：把同目录的 破甲GUI.py 作为独立进程拉起。"""
-    gui = os.path.join(os.path.dirname(os.path.abspath(__file__)), "破甲GUI.py")
+    if getattr(sys, "frozen", False):
+        say("  打包版不含图形界面 —— GUI 要起一个 Python 进程来跑，单文件包里没有。", "y")
+        say("  要图形界面请从源码运行：python src/破甲GUI.py", "y")
+        return
+    gui = os.path.join(HERE, "破甲GUI.py")
     if not os.path.isfile(gui):
         say("  找不到 破甲GUI.py，图形界面不可用。", "red")
         return

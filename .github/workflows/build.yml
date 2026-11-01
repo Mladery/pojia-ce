@@ -1,0 +1,113 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 固定版本：换 PyInstaller 版本会改变产物行为（引导器、onefile 解包方式），
+  # 出问题时要能确定是"代码改了"还是"打包器变了"。
+  PYINSTALLER_VERSION: "6.16.0"
+  BIN_NAME: pojia-ce
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 四种产物覆盖绝大多数人：Windows x64、Linux x64、Intel Mac、Apple Silicon Mac。
+        # macos-13 是最后一个 x86_64 的 GitHub 托管镜像；macos-latest 已经是 arm64。
+        include:
+          - { os: windows-latest, py: "3.11", asset: windows-x64, ext: ".exe" }
+          - { os: ubuntu-latest,  py: "3.11", asset: linux-x64,   ext: ""     }
+          - { os: macos-13,       py: "3.11", asset: macos-x64,   ext: ""     }
+          - { os: macos-latest,   py: "3.11", asset: macos-arm64, ext: ""     }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
+
+      - name: 安装 PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller==${{ env.PYINSTALLER_VERSION }}"
+
+      - name: 打包
+        shell: bash
+        run: |
+          # 构建产物全部落在 build/ 下（已 gitignore），仓库根目录保持干净。
+          # specpath 必须和脚本同盘：PyInstaller 会用 relpath 算相对路径，
+          # 跨盘符直接 ValueError（本机踩过，J: 源码 + C: 临时目录）。
+          python -m PyInstaller \
+            --onefile --clean --noconfirm \
+            --name "$BIN_NAME" \
+            --distpath build/dist \
+            --workpath build/work \
+            --specpath build \
+            src/破甲一键通.py
+          ls -lh "build/dist/$BIN_NAME${{ matrix.ext }}"
+
+      - name: 冒烟：产物能跑、版本号对
+        shell: python
+        run: |
+          import glob, os, subprocess, sys
+          cands = [p for p in glob.glob("build/dist/*") if os.path.isfile(p)]
+          assert len(cands) == 1, cands
+          exe = cands[0]
+          if os.name != "nt":
+              os.chmod(exe, 0o755)
+          r = subprocess.run([exe, "--version"], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=120)
+          print("stdout:", r.stdout.strip())
+          assert r.returncode == 0, r.stderr
+          assert "CE" in r.stdout, r.stdout
+          # --help 会把目标列表拼出来，顺带确认注册表在冻结态也是完整的
+          r2 = subprocess.run([exe, "--help"], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=120)
+          assert r2.returncode == 0, r2.stderr
+          assert "kiro" in r2.stdout, "--help 里没列出 kiro"
+
+      - name: 改名
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "build/dist/$BIN_NAME${{ matrix.ext }}" \
+             "out/$BIN_NAME-${{ matrix.asset }}${{ matrix.ext }}"
+          ls -lh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-${{ matrix.asset }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
+
+      # 打 tag 时才发 Release。先 view 再 create，多个 job 并发跑也不会互相踩；
+      # 上传用 --clobber，重跑同一个 tag 能覆盖旧产物。
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --generate-notes \
+            || true
+          gh release upload "$TAG" "out/$BIN_NAME-${{ matrix.asset }}${{ matrix.ext }}" --clobber
