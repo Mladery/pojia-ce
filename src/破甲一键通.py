@@ -209,6 +209,11 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess._dsh_no_window_patched = True
 
 VERSION = "8.2"
+# 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
+# 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
+# "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。
+EDITION = "CE"
+VER_TAG = VERSION + "-" + EDITION
 CHECK_EXIT_CODES = []          # --check 用：收集不达标项（只影响退出码，不改状态码）
 ERRORS = 0                     # v7.4：apply/revert 里的失败项累计（>0 → 进程退出码 1）
 
@@ -2081,7 +2086,7 @@ class DshTarget:
                 or persona_stale(self.dsh_home(), want) \
                 or getattr(args, "force", False)  # <--- 修复：强制覆盖
         if _up and mode == "apply":
-            _why = ("护照 %s → 本版 %s" % (passport_version(self.dsh_home()) or "无护照", VERSION)
+            _why = ("护照 %s → 本版 %s" % (passport_version(self.dsh_home()) or "无护照", VER_TAG)
                     if need_upgrade(self.dsh_home(), self.key)
                     else "人格文件已更新（护照记录 %s → 当前 %s）"
                          % (passport_persona_hash(self.dsh_home())[:12] or "?", want[:12]))
@@ -2566,6 +2571,197 @@ def find_install_by_walk(exe_name, judge, max_depth=3, budget=8.0, cap=40000):
                     nxt.append(e.path)
         level = nxt
     return ""
+
+
+# ── 会话快照（WorkBuddy 每次启动写在 TEMP 里的产品配置副本）──────────────────
+# 这些文件不在备份范围内，删了 --revert 也找不回来，所以清理必须显式要求。
+# 另外它们会把产品配置里的 apiKey 一起复制出来，因此清理顺带做一次密钥体检。
+
+SPILL_SECRET_PATTERNS = (
+    ("API Key", re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{16,}")),
+    ("Bearer 令牌", re.compile(r"Bearer\s+([A-Za-z0-9._\-]{20,})")),
+    ("JWT", re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
+    ("私钥块", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+)
+
+_SPILL_SCAN_CACHE = {"t": 0.0, "val": None}
+
+
+_SPILL_OWNER_CACHE = {}
+
+
+def _spill_owner(path):
+    """读副本自己的 `dataFolderName`，判断这份快照属于哪个数据目录（读不到返回空）。"""
+    if path in _SPILL_OWNER_CACHE:
+        return _SPILL_OWNER_CACHE[path]
+    owner = ""
+    try:
+        fs = ([os.path.join(r, f) for r, _d, xs in os.walk(path) for f in xs]
+              if os.path.isdir(path) else [path])
+        if fs:
+            with open(fs[0], "rb") as f:
+                # dataFolderName 在 ~170 KB 处，256 KB 足够，不必把 570 KB 全读一遍
+                head = f.read(262144)
+            m = re.search(rb'"dataFolderName"\s*:\s*"([^"]*)"', head)
+            if m:
+                owner = m.group(1).decode("utf-8", "replace")
+    except OSError:
+        pass
+    _SPILL_OWNER_CACHE[path] = owner
+    return owner
+
+
+def spill_items(data_dir):
+    """收集会话快照条目：TEMP 里属于本数据目录的 + 数据目录 cache 里的 json。
+
+    TEMP 里的副本是各版本共用的一个目录，靠副本自身的 dataFolderName 认领归属 ——
+    不然 `--check` 会把同一批文件在 wb 和 wbintl 底下各报一遍（实测）。
+    认不出归属的老副本一律算给当前目标：宁可多报，不要漏报。
+    """
+    items = []
+    want = os.path.basename((data_dir or "").rstrip("\\/"))
+    tmp = os.environ.get("TEMP", "")
+    if tmp and os.path.isdir(tmp):
+        try:
+            for x in os.listdir(tmp):
+                if not x.startswith("workbuddy-product-spill-"):
+                    continue
+                p = os.path.join(tmp, x)
+                owner = _spill_owner(p)
+                if want and owner and owner != want:
+                    continue
+                items.append(p)
+        except OSError:
+            pass
+    sp = os.path.join(data_dir or "", "cache", "conversation-product-spill")
+    if data_dir and os.path.isdir(sp):
+        try:
+            items += [os.path.join(sp, x) for x in os.listdir(sp) if x.endswith(".json")]
+        except OSError:
+            pass
+    return items
+
+
+def scan_spill_secrets(items, budget=3.0, max_files=120, cache_sec=120):
+    """扫会话快照里的明文密钥。
+
+    硬性约定与 scan_config_hints 一致：**绝不打印原文**，只给位置、脱敏形态和
+    大致来源（就近的 https 主机名）。返回 (已扫描份数, 总份数, 命中表)。
+
+    命中表形如 {(类型, 原文): {"count": n, "files": set(), "host": "api.xxx"}}，
+    调用方负责脱敏后再展示。
+
+    缓存按**这一批条目**取键，不能只按时间：`--check` 里 wb 和 wbintl 的副本
+    是两批不同的文件，按时间缓存会把 wb 的结果原样回给 wbintl（实测踩过）。
+    """
+    now = time.time()
+    sig = tuple(sorted(items))
+    if (_SPILL_SCAN_CACHE["val"] and _SPILL_SCAN_CACHE.get("sig") == sig
+            and (now - _SPILL_SCAN_CACHE["t"]) < cache_sec):
+        return _SPILL_SCAN_CACHE["val"]
+    t0 = time.time()
+    files = []
+    for p in items:
+        try:
+            if os.path.isdir(p):
+                files += [os.path.join(r, f) for r, _d, fs in os.walk(p) for f in fs]
+            else:
+                files.append(p)
+        except OSError:
+            continue
+    scanned = 0
+    uniq = {}
+    for f in files:
+        if scanned >= max_files or (time.time() - t0) > budget:
+            break
+        try:
+            if os.path.getsize(f) > 8 * 1024 * 1024:
+                continue
+        except OSError:
+            continue
+        raw = read_text_safe(f)
+        if not raw:
+            continue
+        scanned += 1
+        for label, pat in SPILL_SECRET_PATTERNS:
+            for m in pat.finditer(raw):
+                tok = m.group(1) if m.groups() else m.group(0)
+                ctx = raw[max(0, m.start() - 600):m.start()]
+                hosts = re.findall(r"https://([A-Za-z0-9.\-]+)", ctx)
+                slot = uniq.setdefault((label, tok), {"count": 0, "files": set(),
+                                                      "host": hosts[-1] if hosts else ""})
+                slot["count"] += 1
+                slot["files"].add(f)
+    val = (scanned, len(files), uniq)
+    _SPILL_SCAN_CACHE.update({"t": now, "val": val, "sig": sig})
+    return val
+
+
+def spill_age_summary(items, max_age_hours=24):
+    """把会话快照分成「过期 / 全部」两档，返回 (过期份数, 过期字节, 总份数, 总字节)。"""
+    cut = _dt.datetime.now() - _dt.timedelta(hours=max_age_hours)
+    n_old = sz_old = n_all = sz_all = 0
+    for p in items:
+        try:
+            if os.path.isdir(p):
+                sz = sum(os.path.getsize(os.path.join(r, f))
+                         for r, _d, fs in os.walk(p) for f in fs)
+            else:
+                sz = os.path.getsize(p)
+        except OSError:
+            continue
+        n_all += 1
+        sz_all += sz
+        try:
+            old = _dt.datetime.fromtimestamp(os.path.getmtime(p)) <= cut
+        except (OSError, ValueError):
+            old = False
+        if old:
+            n_old += 1
+            sz_old += sz
+    return n_old, sz_old, n_all, sz_all
+
+
+_SPILL_ROWS_CACHE = {}
+
+
+def spill_rows(data_dir, max_age_hours=24):
+    """会话快照的体检行：先说清它是什么，再说有没有把密钥带出来。
+
+    同一个数据目录在一次运行里只算一遍 —— `--check` 会依次问 wb 和 wbintl，
+    两边看到的是同一批 TEMP 副本，不缓存就会把同一段话报两遍。
+    """
+    key = data_dir or ""
+    if key in _SPILL_ROWS_CACHE:
+        return _SPILL_ROWS_CACHE[key]
+    rows = []
+    items = spill_items(data_dir)
+    n_old, sz_old, n_all, sz_all = spill_age_summary(items, max_age_hours)
+    if n_all:
+        rows.append(("warn" if n_old else "info",
+                     "会话快照：%d 份，共 %.1f MB（其中 %d 份超过一天，%.1f MB）"
+                     % (n_all, sz_all / 1048576.0, n_old, sz_old / 1048576.0),
+                     "程序每次启动都会在 TEMP 留一份自己的配置副本，正常退出才删，"
+                     "数据目录的 cache 里也存一份。删了不影响任何功能；"
+                     "要清加 --clean-spill（只清过期的）或 --purge-spill（全清）"))
+        scanned, _total, uniq = scan_spill_secrets(items, budget=2.0, max_files=60)
+        if uniq:
+            rows.append(("warn",
+                         "密钥体检：%d 份快照里翻出 %d 个明文密钥（只报脱敏形态）"
+                         % (scanned, len(uniq)),
+                         "这是配置里的 key 被原样复制出来的结果，不等于已经泄露；"
+                         "清掉快照即消失。但 key 在配置里本来就是明文存的 —— "
+                         "别把 TEMP 目录整个打包发给别人"))
+            for (label, tok), info in sorted(uniq.items(),
+                                             key=lambda kv: (-kv[1]["count"], kv[0][0])):
+                rows.append(("warn",
+                             "%s × %d 份：%s" % (label, info["count"], mask_secret(tok)),
+                             "来源约 %s" % (info.get("host") or "未标注")))
+        elif scanned:
+            rows.append(("ok", "密钥体检：扫了 %d 份快照，没发现明文密钥" % scanned,
+                         "只读扫描，未打开任何外部文件"))
+    _SPILL_ROWS_CACHE[key] = rows
+    return rows
 
 
 class WorkBuddyTarget:
@@ -3190,21 +3386,7 @@ class WorkBuddyTarget:
         """
         n, size = 0, 0
         cut = _dt.datetime.now() - _dt.timedelta(hours=max_age_hours)
-        items = []
-        tmp = os.environ.get("TEMP", "")
-        if tmp and os.path.isdir(tmp):
-            try:
-                items += [os.path.join(tmp, x) for x in os.listdir(tmp)
-                          if x.startswith("workbuddy-product-spill-")]
-            except Exception:
-                pass
-        sp = os.path.join(data_dir, "cache", "conversation-product-spill")
-        if os.path.isdir(sp):
-            try:
-                items += [os.path.join(sp, x) for x in os.listdir(sp) if x.endswith(".json")]
-            except Exception:
-                pass
-        for p in items:
+        for p in spill_items(data_dir):
             try:
                 if not purge_all:
                     if _dt.datetime.fromtimestamp(os.path.getmtime(p)) > cut:
@@ -3399,7 +3581,7 @@ class WorkBuddyTarget:
                     if not stats.get("_up_logged"):
                         stats["_up_logged"] = 1
                         log("  检测到旧版安装（护照 %s → 本版 %s）：自动重写升级。"
-                            % (passport_version(data_dir or install) or "无护照", VERSION), "c", "wb")
+                            % (passport_version(data_dir or install) or "无护照", VER_TAG), "c", "wb")
                 if as_json:
                     res, _c = self.patch_json_text(new, policy, OVERLAY)
                 else:
@@ -3480,14 +3662,18 @@ class WorkBuddyTarget:
             elif _purge or _clean:
                 n, size = self.clear_session_spill(data_dir, 24, _purge)
                 if n:
-                    log("已清理会话快照 %d 份（%.1f KB）%s"
-                        % (n, size / 1024.0, "（全部）" if _purge else "（24 小时以前的）"), "g", "wb")
+                    log("已清理会话快照 %d 份（%.1f MB）%s"
+                        % (n, size / 1048576.0, "（全部）" if _purge else "（24 小时以前的）"), "g", "wb")
             else:
-                n, size = self.clear_session_spill(data_dir, 24, False, dry=True)
-                if n:
-                    log("发现 %d 份过期会话快照（%.1f KB）—— **未删除**（不在备份范围内，"
-                        "删了还原不回来）。要清理请加 --clean-spill（只清过期的）或 "
-                        "--purge-spill（清全部）" % (n, size / 1024.0), "dg", "wb")
+                _rows = spill_rows(data_dir, 24)
+                if _rows:
+                    log("磁盘上的历史副本（默认不清理，先看看现状）：", "dg", "wb")
+                    for st, note, detail in _rows:
+                        log("  · %s" % note, "y" if st == "warn" else "", "wb")
+                        if detail:
+                            log("    %s" % detail, "dg", "wb")
+                    log("  本工具没有删它们：这些副本不在备份范围内，删了 --revert 也找不回来。"
+                        "要清就明说 —— --clean-spill 只清过期的那批，--purge-spill 全清。", "dg", "wb")
 
         # ---------- 复查 ----------
         # v7.4 重写：原来只统计"文件里含 <content_policy> 且 is_prompt_tpl() 且判定为空"的靶点，
@@ -3631,6 +3817,10 @@ class WorkBuddyTarget:
                 rows.append(("ok", "云记忆 %s：%d 字，Version %d，只读锁=%s"
                              % (name, nchar, ver, "已设" if ro else "未设"),
                              "" if ro else "只读锁未生效：程序可能回写覆盖"))
+        # 会话快照（v8.2）：只报不删。它既是磁盘垃圾，也是密钥副本的窝点，
+        # 体检里必须点名，否则用户永远不知道 TEMP 里躺着几百份自己的配置。
+        if data_dir:
+            rows.extend(spill_rows(data_dir, 24))
         return rows
 
     def task_states(self):
@@ -4085,7 +4275,7 @@ def passport_status(root, key):
     ver = obj.get("version", "?")
     if ver == VERSION:
         return "current", "护照 v%s（本版）" % ver
-    return "other", "护照 v%s（旧版；本版是 v%s）" % (ver, VERSION)
+    return "other", "护照 v%s（旧版；本版是 v%s）" % (ver, VER_TAG)
 
 
 # ---- 3. 脱敏体检（--check） ------------------------------------------------
@@ -4179,6 +4369,41 @@ def run_check(args):
         say("  体检结论：有 XX 项需要处理（上面逐条列出）。", "y")
     say(GRAY("  本次为只读检查：未写入、未备份、未改动任何文件。"))
     return 0 if ok_all else 1
+
+
+def run_spill_clean(args):
+    """只清会话快照，不连带跑一遍破甲。
+
+    `--clean-spill` / `--purge-spill` 原来只在 apply() 里被读，于是单独敲这两个
+    开关什么也不会发生（连 --target 都不认），用户以为删了、实际一份没动。
+    """
+    header("会话快照清理", "只动 TEMP 与 cache 里的产品配置副本")
+    purge = bool(getattr(args, "purge_spill", False))
+    total_n = total_sz = 0
+    for k in resolve_targets(getattr(args, "target", "all")):
+        t = TARGETS[k]()
+        if not hasattr(t, "clear_session_spill"):
+            continue
+        data_dir = t.resolve_data_dir(getattr(args, t.data_attr, "") or "")
+        if not data_dir:
+            say("  %-16s 没找到数据目录，跳过" % t.label, "dg")
+            continue
+        n, sz = t.clear_session_spill(data_dir, 24, purge, dry=False)
+        total_n += n
+        total_sz += sz
+        if n:
+            say("  %-16s 已清理 %d 份（%.1f MB）" % (t.label, n, sz / 1048576.0), "g")
+        else:
+            say("  %-16s 没有符合条件的快照" % t.label, "dg")
+    say("")
+    if total_n:
+        say("  合计清理 %d 份，释放 %.1f MB%s"
+            % (total_n, total_sz / 1048576.0,
+               "（全部，含未过期的）" if purge else "（24 小时以前的）"), "g")
+        say(GRAY("  这些是程序自己留的配置副本，删了不影响功能；--revert 也不会把它们变回来。"))
+    else:
+        say("  没有可清理的会话快照。", "dg")
+    return 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5056,7 +5281,7 @@ class ZCodeTarget:
 
         if need_up and not changed:
             log("检测到旧版安装（护照 %s → 本版 %s）：自动重写升级。"
-                % (passport_version(home) or "无护照", VERSION), "c", "zcode")
+                % (passport_version(home) or "无护照", VER_TAG), "c", "zcode")
 
         # 写盘（原子写 + 改前留备份）
         if os.path.exists(cfg_agents) and old_agents.strip():
@@ -6282,7 +6507,7 @@ def header(title, sub=""):
     if QUIET:
         return
     print(BOLD(CYAN("╔" + "═" * W + "╗")))
-    print(BOLD(CYAN("║")) + fit("  破甲一键通  v" + VERSION + ("   " + title if title else ""), W) + BOLD(CYAN("║")))
+    print(BOLD(CYAN("║")) + fit("  破甲一键通  v" + VER_TAG + ("   " + title if title else ""), W) + BOLD(CYAN("║")))
     if sub:
         print(BOLD(CYAN("║")) + GRAY(fit("  " + sub, W)) + BOLD(CYAN("║")))
     print(BOLD(CYAN("╚" + "═" * W + "╝")))
@@ -6392,7 +6617,7 @@ def run_status(args, targets=None, allow_ask=False):
     global READONLY
     READONLY = True                       # v7.9：只读入口自己声明，见 log() 处说明
     targets = targets or resolve_targets(args.target)
-    header("状态检测（只读）", "所有目标共用一套人格 / v%s 起带自证口令" % VERSION)
+    header("状态检测（只读）", "所有目标共用一套人格 / v%s 起带自证口令" % VER_TAG)
     for k in targets:
         t = TARGETS[k]()
         if allow_ask:
@@ -6468,12 +6693,61 @@ def run_action(args, mode, targets=None):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _flush_stdin():
+    """丢掉标准输入里残留的换行。
+
+    PyCharm / VSCode 的运行窗口在 input() 之后经常还留着上一次的 \\r\\n（回车在
+    Windows 上是两个字符）。用户按一次回车「返回菜单」，菜单的 input() 立刻把那个
+    残留换行读成空输入 —— 这就是「按两次回车就结束」的另一半原因。
+    """
+    if not IS_WIN:
+        return
+    try:
+        import msvcrt
+    except ImportError:
+        return
+    try:
+        while msvcrt.kbhit():
+            msvcrt.getwch()
+    except Exception:
+        pass
+
+
+def wait_enter(prompt="按回车或空格返回菜单…"):
+    """等一次按键：回车、空格、Esc、q 都算，不必再按一次回车。
+
+    原来的实现是 input()，在 PyCharm 里有两个毛病：空格不算提交（按了没反应），
+    而且回车会进缓冲区，被下一次菜单读取吃掉。这里在 Windows 控制台上改用
+    msvcrt 逐字符读，读完再清空缓冲区，两边都堵住。
+    """
+    print("\n" + GRAY("  " + prompt), end="", flush=True)
+    if IS_WIN and sys.stdin is not None and sys.stdin.isatty():
+        try:
+            import msvcrt
+            while True:
+                ch = msvcrt.getwch()
+                if ch in ("\r", "\n", " ", "\x1b", "q", "Q"):
+                    break
+                if ch in ("\x00", "\xe0"):     # 方向键 / 功能键带一个前缀字节，读掉
+                    msvcrt.getwch()
+            print()
+            _flush_stdin()
+            return
+        except Exception:
+            pass
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        pass
+    print()
+
+
 def menu(args):
     W = 70
     while True:
         clear_screen()
         print(BOLD(CYAN("╔" + "═" * W + "╗")))
-        print(BOLD(CYAN("║")) + fit("  破甲一键通  v%s   多目标统一脚本" % VERSION, W) + BOLD(CYAN("║")))
+        print(BOLD(CYAN("║")) + fit("  破甲一键通  v%s   多目标统一脚本" % VER_TAG, W) + BOLD(CYAN("║")))
         print(BOLD(CYAN("║")) + GRAY(fit("  " + FREE_LINE, W)) + BOLD(CYAN("║")))
         print(BOLD(CYAN("╠" + "═" * W + "╣")))
         for line in ("  [1] 一键破甲         ← 先选要破哪个（dsh / WorkBuddy / ZCode）",
@@ -6488,14 +6762,21 @@ def menu(args):
                      "  [0] 退出"):
             print(BOLD(CYAN("║")) + fit(line, W) + BOLD(CYAN("║")))
         print(BOLD(CYAN("╚" + "═" * W + "╝")))
+        _flush_stdin()                      # 清掉上一轮残留的换行，避免空输入直接跳过菜单
         try:
             c = input(BOLD(GREEN("  请选择 (0-9) > "))).strip().lstrip("\ufeff")
         except (EOFError, KeyboardInterrupt):
             print()
             return
 
-        if c in ("0", "", "q", "Q", "exit", "quit"):
+        if c in ("0", "q", "Q", "exit", "quit"):
             return
+
+        if not c:
+            # 空输入只重画菜单，绝不退出。
+            # 以前这里和 "0" 一起 return，于是 PyCharm 运行窗口里残留的一个换行
+            # 就能把整个程序关掉 —— 现象就是「按两次回车，菜单一闪就结束」。
+            continue
 
         try:
             if c == "1":
@@ -6533,11 +6814,7 @@ def menu(args):
             say("")
             continue
 
-        try:
-            input("\n" + GRAY("  按回车返回菜单…"))
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
+        wait_enter()
 
 
 def _detect_quick(k, args):
@@ -6746,7 +7023,7 @@ def check_runtime():
 def build_parser():
     p = argparse.ArgumentParser(
         description="破甲一键通 v%s —— %s，共 %d 个目标一键破甲"
-                    % (VERSION, " / ".join(TARGET_LABEL[k] for k in DEFAULT_TARGETS),
+                    % (VER_TAG, " / ".join(TARGET_LABEL[k] for k in DEFAULT_TARGETS),
                        len(DEFAULT_TARGETS)),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""示例：
@@ -6807,8 +7084,23 @@ def build_parser():
     p.add_argument("--claude-dir", help="手动指定 Claude 配置目录（一般是 用户目录\\.claude）")
     p.add_argument("--yes", "-y", action="store_true", help="非交互，不二次确认")
     p.add_argument("--quiet", action="store_true", help="静默（守护任务用）")
-    p.add_argument("--version", action="version", version="破甲一键通 " + VERSION)
+    p.add_argument("--version", action="version", version="破甲一键通 " + VER_TAG)
+    p.add_argument("--gui", action="store_true",
+                   help="打开图形界面（本机网页 UI，零依赖）")
     return p
+
+
+def _launch_gui():
+    """起图形界面：把同目录的 破甲GUI.py 作为独立进程拉起。"""
+    gui = os.path.join(os.path.dirname(os.path.abspath(__file__)), "破甲GUI.py")
+    if not os.path.isfile(gui):
+        say("  找不到 破甲GUI.py，图形界面不可用。", "red")
+        return
+    try:
+        subprocess.Popen([sys.executable, gui], cwd=os.path.dirname(gui))
+        say("  已启动图形界面，浏览器会自动打开；关掉那个窗口即退出。", "g")
+    except OSError as e:
+        say("  启动失败：%s" % e, "red")
 
 
 def main():
@@ -6817,6 +7109,9 @@ def main():
     _init_console()
 
     args = build_parser().parse_args()
+    if getattr(args, "gui", False):
+        _launch_gui()
+        return
     if args.quiet:
         QUIET = True
     if args.restore:
@@ -6908,6 +7203,13 @@ def main():
     # ---- 体检（只读，永不改盘） ----
     if getattr(args, "check", False):
         rc = run_check(args)
+        _pause_on_exit()
+        sys.exit(rc)
+
+    # ---- 只清会话快照（显式要求才做，不连带跑一遍破甲） ----
+    if (getattr(args, "clean_spill", False) or getattr(args, "purge_spill", False)) \
+            and not any((args.apply, args.revert, args.dry_run)):
+        rc = run_spill_clean(args)
         _pause_on_exit()
         sys.exit(rc)
 
