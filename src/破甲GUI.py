@@ -382,7 +382,7 @@ PAGE = r"""<!DOCTYPE html>
     font:inherit; color:var(--ink); text-align:left;
   }
   .row:hover{background:var(--surface-2)}
-  .box{
+  .row .box{
     width:13px; height:13px; flex:none; border-radius:3px;
     border:1.5px solid var(--line-2); background:transparent;
     position:relative; transition:background .12s ease, border-color .12s ease;
@@ -541,9 +541,10 @@ PAGE = r"""<!DOCTYPE html>
   .modal{position:fixed; inset:0; display:none; place-items:center; z-index:50;
          background:rgba(28,26,22,.4); padding:20px}
   .modal.on{display:grid}
-  .modal .box{
+  .modal .panel{
     width:min(430px,100%); background:var(--surface);
     border:1px solid var(--line-2); border-radius:var(--r); padding:22px 22px 18px;
+    box-shadow:0 24px 60px -20px rgba(28,26,22,.45);
   }
   .modal h3{margin:0 0 7px; font-size:15.5px; letter-spacing:-.01em}
   .modal p{margin:0 0 6px; font-size:13px; color:var(--ink-2); line-height:1.68}
@@ -691,7 +692,7 @@ PAGE = r"""<!DOCTYPE html>
 </div>
 
 <div class="modal" id="modal">
-  <div class="box">
+  <div class="panel">
     <h3 id="m-title">确认操作</h3>
     <p id="m-desc"></p>
     <div class="kv" id="m-kv"></div>
@@ -818,7 +819,16 @@ function ask(action, name){
     ? `将对下面 ${list.length} 个软件执行，这会修改它们的提示词或配置文件（改前自动备份）。`
     : "还没勾选任何软件，会按「全部」处理，这会修改它们的提示词或配置文件（改前自动备份）。";
   const kv = [];
-  kv.push(`<div><span>软件</span>${list.length ? list.join(" / ") : "全部"}</div>`);
+  /* 显示软件的中文名，不显示 wb / wbintl 这种内部代号；超过四个就折成
+     「前三个 等 N 个」—— 十七个名字堆满一屏，反而没人看。 */
+  const names = list.map(k => {
+    const t = TARGETS.find(x => x[0] === k);
+    return t ? t[1] : k;
+  });
+  const shown = !names.length ? "全部"
+    : names.length > 4 ? names.slice(0, 3).join(" / ") + ` 等 ${names.length} 个`
+    : names.join(" / ");
+  kv.push(`<div><span>软件</span>${shown}</div>`);
   if (selected.has("dsh") || !list.length){
     kv.push(`<div><span>DSH</span>${opts.mode === "preset" ? "只加一个模式（不改官方文件）" : "改配置文件（所有模式生效）"}</div>`);
     if (IS_WIN) kv.push(`<div><span>命令行</span>${opts.gitBash ? "改用 Git Bash（要重启 DSH）" : "保持 PowerShell"}</div>`);

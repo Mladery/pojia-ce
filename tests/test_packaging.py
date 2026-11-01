@@ -156,6 +156,21 @@ def test_render_page_fills_every_placeholder(gui):
     assert gui.REPO_NAME in page
 
 
+def test_modal_panel_class_is_namespaced(gui):
+    """弹窗面板不能和清单里的勾选框共用 `.box`。
+
+    勾选框的 `.box` 原本是条裸规则（13px 方框）。弹窗面板叫 `.box` 的时候，那条
+    规则先命中它 —— `.modal .box` 只覆盖了 width，没覆盖 height，于是整个卡片被压成
+    13px 高，白底只剩标题那一条，正文和按钮全漏到遮罩上。这不是样式没生效，是两个
+    语义撞了名。
+    """
+    page = gui.render_page()
+    assert ".modal .panel{" in page, "弹窗面板的类名被改了？"
+    assert '<div class="panel">' in page
+    # 不允许再出现无作用域的 `.box{}` 规则
+    assert "\n  .box{" not in page, "又出现裸 .box 规则了，换个人用 .box 就会再塌一次"
+
+
 def test_core_version_frozen_asks_self(gui, monkeypatch):
     """冻结态读不到源码，改问 `exe --version`。"""
     monkeypatch.setattr(gui, "FROZEN", True)
