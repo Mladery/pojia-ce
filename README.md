@@ -272,7 +272,7 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 - **能**：文件属性页显示发布者名字，不再是「未知发布者」；本机把根证书加进信任后 `Get-AuthenticodeSignature` 就是 `Valid`；自己机器和企业内分发时少挨一次 SmartScreen 首次拦截。
 - **不能**：对**别人的**电脑没有任何信誉作用。自签根不在他们的信任列表里，照样弹「未知发布者」，SmartScreen 也不会因此放行。要让陌生人的机器不报警，只有买 CA 的 OV/EV 证书一条路。
 
-三个脚本：
+四个脚本：
 
 ```powershell
 # 生成（默认 RSA 4096 / SHA-256 / 10 年；-Trust 顺带让本机信任）
@@ -283,6 +283,9 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 
 # 验签（比对仓库里钉定的公钥证书，不通过退出码 1）
 .\tools\verify-windows.ps1 -Exe pojia-ce-windows-x64.exe
+
+# 把 pfx / 密码发布成 GitHub 的 secret（装了 gh 就自动写，没装就落文件让你自己粘）
+.\tools\set-signing-secrets.ps1 -Pfx D:\certs\pojia-signing.pfx
 ```
 
 **为什么不用 makecert + cert2spc。** 那套 1998 年的工具只能出 MD5 签名、1024 位、且没有 CodeSigning EKU 的证书，现代 Windows 根本不认 —— `signtool sign` 会直接报 `No certificates were found that met all the given criteria`，因为它连选都不会选这张证书。`New-SelfSignedCertificate` 才能出 SHA-256 + RSA 4096 + 正确 EKU 的。
@@ -291,8 +294,10 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 
 | Secret | 内容 |
 |---|---|
-| `WINDOWS_SIGNING_PFX_BASE64` | pfx 的 base64（本机转：读字节 → ToBase64String → 粘进 Settings → Secrets → Actions） |
+| `WINDOWS_SIGNING_PFX_BASE64` | pfx 的 base64（用 `set-signing-secrets.ps1` 生成，别手抄） |
 | `WINDOWS_SIGNING_PFX_PASSWORD` | pfx 密码 |
+
+手抄 base64 有两个坑：多一个换行，解出来的 pfx 就多一个字节、签名直接崩；密码错一位，CI 每次构建都签失败一次，而失败点在 runner 上，本地看不出来。`set-signing-secrets.ps1` 先用这张密码真的开一次 pfx，打不开就退出 1，一个字节都不往 GitHub 写。
 
 两个都没配就自动跳过，产物照发，只是显示「未知发布者」——不会让流水线变红。签名步骤放在冒烟之前，这样万一签名把 exe 弄坏了，冒烟能立刻抓到。
 
@@ -391,7 +396,7 @@ upstream/破甲一键通.v8.14.py    上游 536ece2 的原始核心，未改动�
 tests/                         测试：标记块往返 / 保险丝 / 目标注册表 / 命令行冒烟
 .github/workflows/ci.yml       CI：三平台 × 多 Python 版本跑一遍
 .github/workflows/build.yml    Build：四个平台打单文件可执行文件，打 tag 发 Release
-tools/                         签名工具：生成证书 / 签名 / 验签
+tools/                         签名工具：生成证书 / 签名 / 验签 / 发布 secret
 tools/codesign/                验签锚点：公钥证书（只有公钥，可以公开）
 evidence/                      取证材料：提交时间线、群聊记录、防二改机制拆解
 ```

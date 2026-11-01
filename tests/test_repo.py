@@ -148,3 +148,25 @@ def test_codesign_private_key_never_committed():
             if fn.lower().endswith((".pfx", ".pvk", ".p12")):
                 bad.append(os.path.join(dirpath, fn))
     assert not bad, "工作区里出现了私钥文件：%s" % bad
+
+
+def test_ps1_scripts_have_bom():
+    """tools/ 下的 .ps1 必须是 UTF-8 **带 BOM**。
+
+    Windows PowerShell 5.1 遇到不带 BOM 的文件会按 ANSI 读 UTF-8 字节，中文
+    注释变成一串乱码，解析器在某个乱码处报「意外的标记」—— 报错行号和真实
+    问题差着十万八千里，很难查。这个坑踩过两次，直接上测试。
+    """
+    tools = os.path.join(ROOT, "tools")
+    if not os.path.isdir(tools):
+        pytest.skip("没有 tools 目录")
+
+    bad = []
+    for fn in sorted(os.listdir(tools)):
+        if not fn.lower().endswith(".ps1"):
+            continue
+        with open(os.path.join(tools, fn), "rb") as f:
+            if f.read(3) != b"\xef\xbb\xbf":
+                bad.append(fn)
+    assert not bad, (
+        "这些 .ps1 没有 UTF-8 BOM，5.1 会读成 ANSI 并报一堆假语法错：%s" % bad)
