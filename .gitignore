@@ -41,3 +41,7 @@ dist/
 # 例外：**公钥**证书要入库 —— 它是验签的锚点。没有它，用户验签时还是得回头
 # 信任发布页，签名就真只剩装逼了。私钥（.pfx / .pvk）仍然挡在上面。
 !tools/codesign/*.cer
+
+# set-signing-secrets.ps1 在没装 gh 时会把 pfx 的 base64 落在这里，等用户手动
+# 粘进 GitHub。这就是私钥本身，一个字都不能进仓库。
+.signing-secrets.local/
