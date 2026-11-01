@@ -164,4 +164,77 @@ def test_launch_gui_frozen_runs_in_process(core, tmp_path, monkeypatch):
 
 def test_launch_gui_missing_file_is_harmless(core, monkeypatch):
     monkeypatch.setattr(core, "_gui_source_path", lambda: "")
-    core._launch_gui()          # 只打印提示，不抛
+    assert core._launch_gui() is False      # 只打印提示，不抛，并且报告没起来
+
+
+def test_default_gui_only_for_frozen_bare_invocation(core, args, monkeypatch):
+    """双击打包版（零参数）默认开界面；源码态和带参数的都还是命令行。
+
+    打包版的使用者大多不是命令行用户，双击先看到一屏 ASCII 菜单是反的。
+    """
+    monkeypatch.setattr(core.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(core.sys, "argv", ["pojia-ce.exe"])
+    assert core._default_to_gui(args) is True
+
+    # 带任何参数就不抢：--status / --apply 这些是脚本和守护任务在调
+    monkeypatch.setattr(core.sys, "argv", ["pojia-ce.exe", "--status"])
+    assert core._default_to_gui(args) is False
+
+    # 显式要菜单
+    monkeypatch.setattr(core.sys, "argv", ["pojia-ce.exe"])
+    assert core._default_to_gui(type("A", (), {"menu": True})()) is False
+
+    # 源码态不动：python 破甲一键通.py 还是交互菜单
+    monkeypatch.setattr(core.sys, "frozen", False, raising=False)
+    assert core._default_to_gui(args) is False
+
+
+def test_gui_main_opens_browser_unless_told_not_to(gui, monkeypatch):
+    """打包版双击进来必须自动开浏览器 —— 否则用户只看到一个黑窗口。
+
+    `--no-open`（源码态）和 `POJIA_GUI_NO_OPEN=1`（打包态没地方塞参数）都能关。
+    """
+    opened = []
+    timers = []
+
+    class FakeTimer:
+        def __init__(self, delay, fn):
+            self.fn = fn
+            timers.append(self)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(gui, "ThreadingHTTPServer", _FakeServer)
+    monkeypatch.setattr(gui, "threading", types.SimpleNamespace(Timer=FakeTimer))
+    monkeypatch.setattr(gui, "webbrowser",
+                        types.SimpleNamespace(open=lambda u: opened.append(u)))
+    monkeypatch.setattr(gui.sys, "argv", ["pojia-ce.exe"])
+    monkeypatch.delenv("POJIA_GUI_NO_OPEN", raising=False)
+    monkeypatch.setattr(gui, "FROZEN", True)
+    monkeypatch.setattr(gui, "core_version", lambda: "8.52-CE")
+
+    assert gui.main() == 0
+    assert len(timers) == 1
+    timers[0].fn()                       # 模拟 0.6 秒后真的去开
+    assert opened and opened[0].startswith("http://127.0.0.1:")
+
+    # 关掉的方式：环境变量（打包态唯一能塞的地方）
+    opened.clear()
+    timers.clear()
+    monkeypatch.setenv("POJIA_GUI_NO_OPEN", "1")
+    assert gui.main() == 0
+    assert timers == [] and opened == []
+
+
+class _FakeServer:
+    """替掉真的 ThreadingHTTPServer：不绑端口、不进事件循环。"""
+
+    def __init__(self, addr, handler):
+        self.server_address = ("127.0.0.1", 12345)
+
+    def serve_forever(self):
+        raise KeyboardInterrupt          # 立刻退出，别把测试挂住
+
+    def server_close(self):
+        pass

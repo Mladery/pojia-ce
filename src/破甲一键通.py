@@ -9733,6 +9733,8 @@ def build_parser():
     p.add_argument("--version", action="version", version="破甲一键通 " + VER_TAG)
     p.add_argument("--gui", action="store_true",
                    help="打开图形界面（本机网页 UI，零依赖）")
+    p.add_argument("--menu", action="store_true",
+                   help="打包版双击进来默认开图形界面；加这个走命令行交互菜单")
     # 每个标记块目标都有自己的 --<key>-dir。以前只显式注册了 codex / cursor / claude
     # 三个，其余十个在提示里写着「用 --cline-dir 指定」，实际根本没注册 —— 用户照着
     # 敲就撞 unrecognized arguments，越按提示走越进不去。这里按 TARGETS 兜底补齐，
@@ -9769,12 +9771,12 @@ def _gui_source_path():
 
 
 def _launch_gui():
-    """起图形界面。
+    """起图形界面，成功起来返回 True。
 
     源码态：把同目录的 破甲GUI.py 当**独立进程**拉起 —— GUI 崩了不牵连主程序。
 
     冻结态：包里没有解释器可拉，改用 runpy 在**当前进程**里跑。为什么不重新拉一个
-    自己的 exe？单文件包每次启动都要把 11 MB 解开一遍（约一秒），而 GUI 本来就要
+    自己的 exe？单文件包每次启动都要把十几 MB 解开一遍（约一秒），而 GUI 本来就要
     占住主线程直到用户关窗口，多起一个进程纯属白等。
     """
     gui = _gui_source_path()
@@ -9782,7 +9784,7 @@ def _launch_gui():
         say("  找不到 破甲GUI.py，图形界面不可用。", "red")
         if getattr(sys, "frozen", False):
             say("  这个产物打包时没带图形界面（构建漏了 --add-data），换个官方产物。", "y")
-        return
+        return False
     if getattr(sys, "frozen", False):
         import runpy
         say("  已启动图形界面，浏览器会自动打开；关掉窗口或按 Ctrl+C 即退出。", "g")
@@ -9792,12 +9794,28 @@ def _launch_gui():
             pass
         except Exception as e:
             say("  图形界面异常退出：%s" % e, "red")
-        return
+            return False
+        return True
     try:
         subprocess.Popen([sys.executable, gui], cwd=os.path.dirname(gui))
         say("  已启动图形界面，浏览器会自动打开；关掉那个窗口即退出。", "g")
+        return True
     except OSError as e:
         say("  启动失败：%s" % e, "red")
+        return False
+
+
+def _default_to_gui(args):
+    """双击打包版（一个参数都没有）默认开图形界面。
+
+    打包版的使用者大多不是命令行用户：双击 exe 先看到一屏 ASCII 菜单和免责声明，
+    是反的。所以冻结态 + 无参数 → 直接开界面，菜单留 `--menu`。
+
+    源码态不受影响：`python 破甲一键通.py` 还是交互菜单（开发和脚本都在用）。
+    """
+    return (bool(getattr(sys, "frozen", False))
+            and len(sys.argv) <= 1
+            and not getattr(args, "menu", False))
 
 
 def main():
@@ -9808,6 +9826,10 @@ def main():
     args = build_parser().parse_args()
     if getattr(args, "gui", False):
         _launch_gui()
+        return
+    # 双击打包版进来（没有任何参数）先开界面；起不来（包里没带 GUI）就落到菜单，
+    # 别让用户对着一个空控制台。
+    if _default_to_gui(args) and _launch_gui():
         return
     if args.quiet:
         QUIET = True

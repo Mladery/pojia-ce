@@ -59,7 +59,8 @@ python src/破甲一键通.py --apply --target dsh --dsh-mode preset   # DSH 破
 python src/破甲一键通.py --apply --target dsh --git-bash          # Windows：默认命令工具换成 Git Bash（默认关）
 python src/破甲一键通.py --clean-spill --target wb   # 清过期的会话快照
 python src/破甲一键通.py --revert --target wb
-pojia-ce.exe --gui                           # 打包版的图形界面（下载后直接用，不用装 Python）
+pojia-ce.exe                                 # 打包版：双击/直接跑就开图形界面
+pojia-ce.exe --menu                          # 打包版：走命令行交互菜单
 ```
 
 所有原始开关（`--apply` / `--revert` / `--persona` / `--guard` / `--snapshot` / `--pick`）都保留。先 `--dry-run`，再动手。
@@ -87,7 +88,8 @@ pojia-ce.exe --gui                           # 打包版的图形界面（下载
 
 - **macOS 首次运行会被 Gatekeeper 拦**（未签名）。解掉隔离标记即可：`xattr -d com.apple.quarantine ./pojia-ce-macos-arm64`。
 - **Windows Defender 可能对单文件 exe 报毒** —— PyInstaller 的引导器是常见误报对象。签名（见 [CHANGELOG 的 v8.5-CE](CHANGELOG.md#v85-ce-2026-11-01)）能让属性页显示发布者、本机少挨一次拦截，但**改变不了别人机器上的判断**。要绝对干净就用源码跑，或者自己 `python -m PyInstaller` 打一份。
-- **打包版含图形界面**：`pojia-ce.exe --gui`。界面是打进包里的数据文件，由核心用 runpy 在**进程内**拉起（包里没有解释器可拉第二个进程）；页面里每个动作把 exe 自己当子进程跑，输出照样实时流回页面。不想让它自动开浏览器就设 `POJIA_GUI_NO_OPEN=1`。
+- **打包版双击就进图形界面**：不带参数直接跑（或双击）会开浏览器页面，不用记命令；想看命令行菜单加 `--menu`。界面是打进包里的数据文件，由核心用 runpy 在**进程内**拉起（包里没有解释器可拉第二个进程）；页面里每个动作把 exe 自己当子进程跑，输出照样实时流回页面。不想让它自动开浏览器就设 `POJIA_GUI_NO_OPEN=1`。
+- 带任何参数时不会抢：`--status` / `--apply` / 守护任务用的 `--quiet` 都照旧走命令行。
 
 ---
 
@@ -160,7 +162,7 @@ pojia-ce.exe --gui                           # 打包版的图形界面（下载
 ## 六、校验
 
 ```
-c635e4ecb6aadd485d7db395c8400df9fb66939a2d8df7727a355ab6d8daf8e9  src/破甲一键通.py           (476,579 B / LF)
+be056752f8d5a0cdb437522e17f27fc3515e2852d54a78d421111e7080e9174c  src/破甲一键通.py           (477,621 B / LF)
 e380390e03a0eee1b4a68e8f9bbee055c613ff01b14b153b0fe4d59a974040be  src/破甲GUI.py              (26,642 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
@@ -172,7 +174,7 @@ git clone https://github.com/z91772524-ai/pojia-next && cd pojia-next
 git show 536ece2:破甲一键通.py | sha256sum
 ```
 
-`src/破甲一键通.py` 现在比 `upstream/` 大 125,186 B —— §四 的「只删不加」说的是摘封条那一步（净减）；多出来的字节来自 v8.2 之后的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、破甲模式、守卫、Git Bash 接管、打包适配），逐条见 [CHANGELOG](CHANGELOG.md)。
+`src/破甲一键通.py` 现在比 `upstream/` 大 126,228 B —— §四 的「只删不加」说的是摘封条那一步（净减）；多出来的字节来自 v8.2 之后的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、破甲模式、守卫、Git Bash 接管、打包适配），逐条见 [CHANGELOG](CHANGELOG.md)。
 
 版本号分两段存：`VERSION = "8.52"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.52-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 

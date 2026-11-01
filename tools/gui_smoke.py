@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""打包产物的图形界面冒烟：起界面 → 取地址 → 拉首页 → 点一次「检测状态」。
+"""打包产物的图形界面冒烟：零参数启动 → 取地址 → 拉首页 → 点一次「检测状态」。
 
 为什么要单独一个脚本：GUI 在打包版里是 **runpy 从数据文件里跑起来的**，构建时漏了
 `--add-data`、或者 runpy 那条路走不通，`--version` 和 `--status` 全都照样绿 —— 只有
 真的把界面拉起来才会暴露。CI 的冒烟步骤调它。
+
+**故意不带参数**：零参数（= 双击）就是用户默认走的那条路。界面起不来的话程序会
+退回命令行菜单，菜单读 stdin 拿到 EOF 就退出，于是这里拿不到地址、直接失败 ——
+比只测 `--gui` 更贴近真实。
 
 用法：
     python tools/gui_smoke.py build/dist/pojia-ce.exe
@@ -36,7 +40,8 @@ def main():
     env = dict(os.environ)
     env["POJIA_GUI_NO_OPEN"] = "1"          # 别在 CI 上弹浏览器
     env["PYTHONIOENCODING"] = "utf-8"
-    proc = subprocess.Popen([exe, "--gui"], env=env,
+    proc = subprocess.Popen([exe], env=env,
+                            stdin=subprocess.DEVNULL,      # 万一退回菜单，别卡在 input()
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     url = None
     try:
@@ -51,7 +56,7 @@ def main():
                 url = m.group(1)
                 break
         if not url:
-            return fail("没等到界面地址（--gui 没起来，或者包里没带 破甲GUI.py）")
+            return fail("没等到界面地址（零参数启动没进界面，或者包里没带 破甲GUI.py）")
 
         html = urllib.request.urlopen(url, timeout=60).read().decode("utf-8", "replace")
         if "破甲一键通" not in html:
