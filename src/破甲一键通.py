@@ -86,7 +86,7 @@
      --restart-wb                        破甲后自动重启 WorkBuddy
      --yes / -y                          非交互，不二次确认
      --quiet                             静默（守护任务用）
-     --dsh-dir / --wb-install / --wb-data   手动指定路径
+     --dsh-dir / --wb-install / --wb-data / --wbintl-install   手动指定路径
 
 --------------------------------------------------------------------------------
  原理（三层，各目标对应关系）
@@ -371,6 +371,7 @@ OVERLAY_MARK = "最高优先级覆盖 版本2.0"
 
 BAK_DSH = ".dshpurge.bak"
 BAK_WB = ".unlockbak"
+BAK_WB_INTL = ".unlockbak-ai"   # 国际版（WorkBuddyAI）专用后缀，与国内版互不误认
 
 # ---- v7.7 新增三个目标（Codex / Cursor / Claude）的常量 ----
 BAK_CODEX = ".pojia.bak"
@@ -2285,6 +2286,9 @@ class WorkBuddyTarget:
     key = "wb"
     label = "WorkBuddy"
     bak_suffix = BAK_WB
+    # v8.15-intl：定位/备份参数下沉为类属性，国际版子类只改这几行即可复用全部逻辑
+    install_attr = "wb_install"   # argparse 里手动指定安装目录的参数名
+    data_attr = "wb_data"         # 手动指定数据目录的参数名
 
     # ---------------- 安装目录 ----------------
     def pick_title(self):
@@ -2314,7 +2318,7 @@ class WorkBuddyTarget:
                     "要选 WorkBuddy 的安装根目录（那一层里有 WorkBuddy.exe）。")
 
     def detect_ok(self, args):
-        return bool(self.resolve_install_dir(getattr(args, "wb_install", "") or ""))
+        return bool(self.resolve_install_dir(getattr(args, self.install_attr, "") or ""))
 
     def ask_pick(self, args):
         return do_ask_pick(self, args)
@@ -2438,7 +2442,7 @@ class WorkBuddyTarget:
                 if "miora-hidden" in root:
                     continue
                 for fn in files:
-                    if fn.endswith(".tpl") and not fn.endswith(BAK_WB):
+                    if fn.endswith(".tpl") and not fn.endswith(self.bak_suffix):
                         cands.add(os.path.join(root, fn))
         if install:
             p = os.path.join(install, "resources", "app.asar.unpacked", "cli", "product.json")
@@ -2910,9 +2914,9 @@ class WorkBuddyTarget:
         # `t.dump(args, "diagnose"/"status")` 调用的 → WorkBuddy 一路永远抛
         # 「dump() takes 2 positional arguments but 3 were given」，
         # 于是 `--status` / `--diagnose` 在 WorkBuddy 上一直只报"检测出错"，从没人发现。
-        install = self.resolve_install_dir(getattr(args, "wb_install", "") or "")
-        data_dir = self.resolve_data_dir(getattr(args, "wb_data", "") or "")
-        log("安装目录 : %s" % (install or "(未找到，用 --wb-install 指定)"),
+        install = self.resolve_install_dir(getattr(args, self.install_attr, "") or "")
+        data_dir = self.resolve_data_dir(getattr(args, self.data_attr, "") or "")
+        log("安装目录 : %s" % (install or "(未找到，请手动指定安装目录)"),
             "g" if install else "red", "wb")
         log("数据目录 : %s%s" % (data_dir, "" if os.path.isdir(data_dir) else "  (不存在)"), "", "wb")
         user, _src = load_user_persona(getattr(args, "persona", "") or "")
@@ -2968,8 +2972,8 @@ class WorkBuddyTarget:
 
     # ---------------- 执行 ----------------
     def apply(self, args, mode):
-        install = self.resolve_install_dir(getattr(args, "wb_install", "") or "")
-        data_dir = self.resolve_data_dir(getattr(args, "wb_data", "") or "")
+        install = self.resolve_install_dir(getattr(args, self.install_attr, "") or "")
+        data_dir = self.resolve_data_dir(getattr(args, self.data_attr, "") or "")
         user, src = load_user_persona(getattr(args, "persona", "") or "")
         policy, want = build_policy(user)
         log("人格来源：%s" % src, "dg", "wb")
@@ -2990,9 +2994,9 @@ class WorkBuddyTarget:
                         continue
                     for r, _d, files in os.walk(root):
                         for fn in files:
-                            if fn.endswith(BAK_WB):
+                            if fn.endswith(self.bak_suffix):
                                 n += 1
-                                log("[预演] 将还原 | %s" % os.path.join(r, fn[:-len(BAK_WB)]), "y", "wb")
+                                log("[预演] 将还原 | %s" % os.path.join(r, fn[:-len(self.bak_suffix)]), "y", "wb")
                 log("[预演] 将处理云记忆档案 %d 份（不写盘）" % len(wb_cloudmem_candidates(data_dir)), "y", "wb")
                 log("[预演] 共需还原 %d 个文件（预演，未改盘）" % n, "y", "wb")
                 return {"revert": n, "dry": 1}
@@ -3001,15 +3005,15 @@ class WorkBuddyTarget:
                     continue
                 for r, _d, files in os.walk(root):
                     for fn in files:
-                        if fn.endswith(BAK_WB):
+                        if fn.endswith(self.bak_suffix):
                             src_p = os.path.join(r, fn)
-                            dst = src_p[:-len(BAK_WB)]
+                            dst = src_p[:-len(self.bak_suffix)]
                             try:
                                 shutil.copy2(src_p, dst)
                                 n += 1
                             except Exception:
                                 pass
-            log("共恢复 %d 个文件（.unlockbak）" % n, "g", "wb")
+            log("共恢复 %d 个文件（%s）" % (n, self.bak_suffix), "g", "wb")
             for line in wb_cloudmem_revert(data_dir):
                 log("  云记忆：" + line, "g", "wb")
             log("提示：还原后需重启 WorkBuddy 才生效。", "dg", "wb")
@@ -3248,8 +3252,8 @@ class WorkBuddyTarget:
     # ---------------- 体检（--check 用，只读） ----------------
     def check(self, args):
         rows = []
-        install = self.resolve_install_dir(getattr(args, "wb_install", "") or "")
-        data_dir = self.resolve_data_dir(getattr(args, "wb_data", "") or "")
+        install = self.resolve_install_dir(getattr(args, self.install_attr, "") or "")
+        data_dir = self.resolve_data_dir(getattr(args, self.data_attr, "") or "")
         if not install and not data_dir:
             rows.append(("warn", "没找到 WorkBuddy 安装目录或数据目录", "装了就用 --pick wb 手动指定"))
             return rows
@@ -3340,8 +3344,8 @@ class WorkBuddyTarget:
             return ""
 
     def do_snapshot(self, args):
-        install = self.resolve_install_dir(getattr(args, "wb_install", "") or "")
-        data_dir = self.resolve_data_dir(getattr(args, "wb_data", "") or "")
+        install = self.resolve_install_dir(getattr(args, self.install_attr, "") or "")
+        data_dir = self.resolve_data_dir(getattr(args, self.data_attr, "") or "")
         stamp = now_stamp()
         out = os.path.join(HERE, SNAP_PREFIX + stamp)
         tpl_dir = os.path.join(out, "tpl")
@@ -4273,6 +4277,160 @@ def zcode_patch_sysprompt(cjs_path, payload, dry=False):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  四·八·b、目标三·B：WorkBuddy 国际版（社区版新增，上游未收录）
+# ══════════════════════════════════════════════════════════════════════════════
+
+class WorkBuddyGlobalTarget(WorkBuddyTarget):
+    """WorkBuddy 国际版（WorkBuddyAI.exe / endpoint workbuddy.ai / ~/.workbuddy-ai）。
+
+    目录结构与国内版完全同构（templates + cli/product.json + plugins/cache），
+    靶点/补丁/备份逻辑全部继承，只覆写「定位链」。与国内版目标的关键差异：
+
+    - 安装根判据 = TPL_PROBE **且** WorkBuddyAI.exe 在场。两个版本的 TPL_PROBE
+      （workbuddy-prompt.tpl）都在，只查模板会把国内版目录误认成国际版。
+    - 定位链把进程反查放在第一位：国际版正在运行时，直接按 WorkBuddyAI.exe
+      的命令行反查安装根 —— 双版本并存、自定义安装盘（如 X://Workbuddy-GLOBAL//）
+      的机器上，这一步比扫盘又准又快，也是最常见的真实场景。
+    - 数据目录默认 ~/.workbuddy-ai（国内版是 ~/.workbuddy，两个目录并存时
+      父类的 (".workbuddy", ".workbuddy-ai") 顺序会先命中国内版，必须覆写）。
+    - cache 里的产品配置实际叫 acc-product-config-v3-<pid>-<hash>.json，
+      父类只找精确名 acc-product-config-v3.json（两个版本都找不到），这里用 glob 兜住。
+    """
+    key = "wbintl"
+    label = "WorkBuddy Intl"
+    bak_suffix = BAK_WB_INTL
+    install_attr = "wbintl_install"
+    data_attr = "wbintl_data"
+
+    @staticmethod
+    def _is_intl_root(d):
+        """国际版安装根判据：模板探测 + WorkBuddyAI.exe 在场。"""
+        return bool(d) and os.path.exists(os.path.join(d, TPL_PROBE)) \
+            and os.path.exists(os.path.join(d, "WorkBuddyAI.exe"))
+
+    def pick_title(self):
+        return "选择 WorkBuddy 国际版的安装目录（那一层里应该有 WorkBuddyAI.exe）"
+
+    def resolve_pick(self, path):
+        """把用户点选的目录解析成国际版安装根。返回 (目录, 出错说明)。"""
+        p = os.path.normpath(path)
+        if self._is_intl_root(p):
+            return p, ""
+        # 用户可能选深了，一路往上找到安装根为止
+        cur = p
+        for _ in range(6):
+            parent = os.path.dirname(cur)
+            if not parent or parent == cur:
+                break
+            cur = parent
+            if self._is_intl_root(cur):
+                return cur, ""
+        return "", ("这里没找到 WorkBuddyAI.exe（同层还要有 "
+                    "resources\\app.asar.unpacked\\resources\\templates\\workbuddy-prompt.tpl）。"
+                    "要选国际版的安装根目录（那一层里有 WorkBuddyAI.exe）。")
+
+    def resolve_install_dir(self, explicit=""):
+        ok = self._is_intl_root
+        if explicit:
+            good, _note = self.resolve_pick(explicit)
+            return good or (explicit if os.path.isdir(explicit) else "")
+
+        # 0) 用户手动指定过、并且还有效的目录 —— 优先级最高
+        manual = get_manual_path(self.key)
+        if ok(manual):
+            return manual
+
+        # 1) 进程反查（优先）：国际版正在运行时按 WorkBuddyAI.exe 命令行反查安装根。
+        #    正则只认 \WorkBuddyAI.exe 结尾 —— 国内版进程 WorkBuddy.exe 不会误命中，
+        #    反之国内版目标的老正则也认不出国际版，两边天然互斥。
+        for _pid, _name, cmd in list_processes():
+            if not cmd:
+                continue
+            m = re.search(r'([A-Za-z]:\\[^"]*?)\\WorkBuddyAI\.exe', cmd, re.I)
+            if m and ok(m.group(1)):
+                return m.group(1)
+
+        # 2) 环境变量 / 常见位置
+        la = os.environ.get("LOCALAPPDATA", "")
+        if la:
+            p = os.path.join(la, "Programs", "WorkBuddyAI")
+            if ok(p):
+                return p
+
+        # 3) 全盘符扫描（含 Workbuddy-GLOBAL 这类自定义一级目录）
+        user = os.environ.get("USERNAME") or os.path.basename(os.path.expanduser("~"))
+        cands = []
+        for letter in string.ascii_uppercase:
+            root = letter + ":\\"
+            if not os.path.isdir(root):
+                continue
+            for n in ("WorkBuddyAI", os.path.join("Workbuddy-GLOBAL", "WorkBuddyAI")):
+                cands += [os.path.join(root, "Users", user, "AppData", "Local", "Programs", n),
+                          os.path.join(root, "Program Files", n),
+                          os.path.join(root, "Program Files (x86)", n),
+                          os.path.join(root, n)]
+        for c in cands:
+            if ok(c):
+                return c
+
+        # 4) 注册表（国际版卸载项 DisplayName / InstallLocation 含 WorkBuddyAI）
+        if IS_WIN:
+            try:
+                import winreg
+                for hive, sub in ((winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                                  (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                                  (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall")):
+                    try:
+                        k = winreg.OpenKey(hive, sub)
+                    except OSError:
+                        continue
+                    i = 0
+                    while True:
+                        try:
+                            child = winreg.EnumKey(k, i)
+                            i += 1
+                        except OSError:
+                            break
+                        try:
+                            ck = winreg.OpenKey(k, child)
+                        except OSError:
+                            continue
+                        name = loc = ""
+                        try:
+                            name = str(winreg.QueryValueEx(ck, "DisplayName")[0])
+                        except OSError:
+                            pass
+                        try:
+                            loc = str(winreg.QueryValueEx(ck, "InstallLocation")[0])
+                        except OSError:
+                            pass
+                        if "WorkBuddyAI" in name or "WorkBuddyAI" in loc:
+                            loc = loc.strip().rstrip("\\")
+                            if ok(loc):
+                                return loc
+            except Exception:
+                pass
+        return ""
+
+    def resolve_data_dir(self, explicit=""):
+        if explicit:
+            return os.path.normpath(explicit)
+        return os.path.join(os.path.expanduser("~"), ".workbuddy-ai")
+
+    def find_targets(self, data_dir, install):
+        cands = set(super().find_targets(data_dir, install))
+        # cache 产品配置带 pid/hash 后缀，父类的精确名匹配两边都落空，glob 兜住
+        if data_dir:
+            cache = os.path.join(data_dir, "cache")
+            if os.path.isdir(cache):
+                for fn in os.listdir(cache):
+                    if fn.startswith("acc-product-config-v3") and fn.endswith(".json"):
+                        cands.add(os.path.join(cache, fn))
+        # 本目标备份后缀是 .unlockbak-ai，父类只排 .unlockbak —— 两个都排掉
+        return sorted(c for c in cands
+                      if not c.endswith(BAK_WB) and not c.endswith(self.bak_suffix))
+
+
 #  四·九、目标四：ZCode（v7.1 新增）
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -5726,12 +5884,16 @@ class CopilotTarget(_MarkBlockTarget):
 #  五、统一调度
 # ══════════════════════════════════════════════════════════════════════════════
 
-TARGETS = {"dsh": DshTarget, "wb": WorkBuddyTarget, "zcode": ZCodeTarget,
+TARGETS = {"dsh": DshTarget, "wb": WorkBuddyTarget, "wbintl": WorkBuddyGlobalTarget,
+           "zcode": ZCodeTarget,
            "codex": CodexTarget, "cursor": CursorTarget, "claude": ClaudeTarget,
            "gemini": GeminiTarget, "qwen": QwenTarget, "iflow": IflowTarget,
            "trae": TraeTarget, "codebuddy": CodeBuddyTarget, "opencode": OpenCodeTarget,
            "windsurf": WindsurfTarget, "cline": ClineTarget, "copilot": CopilotTarget}
-TARGET_ALIAS = {"workbuddy": "wb", "dsh-desktop": "dsh",
+TARGET_ALIAS = {"workbuddy": "wb",
+                "workbuddy-ai": "wbintl", "workbuddyai": "wbintl",
+                "workbuddy-intl": "wbintl", "wbai": "wbintl",
+                "dsh-desktop": "dsh",
                 "z-code": "zcode", "zcode-desktop": "zcode",
                 "gpt": "codex", "openai": "codex",
                 "claude-code": "claude", "anthropic": "claude",
@@ -5743,14 +5905,14 @@ TARGET_ALIAS = {"workbuddy": "wb", "dsh-desktop": "dsh",
                 "codeium": "windsurf",
                 "copilot-cli": "copilot", "github": "copilot",
                 "all": "all"}
-DEFAULT_TARGETS = ["dsh", "wb", "zcode", "codex", "cursor", "claude",
+DEFAULT_TARGETS = ["dsh", "wb", "wbintl", "zcode", "codex", "cursor", "claude",
                    "gemini", "qwen", "iflow", "trae", "codebuddy",
                    "opencode", "windsurf", "cline", "copilot"]
 
 # 界面用的短名。启动横幅由它 + DEFAULT_TARGETS 拼出来 ——
 # 原来横幅写死成 "DSH / WorkBuddy / ZCode"，v7.7 加到六个目标后忘了同步，
 # 于是启动界面一直少列三个（用户可见的陈旧文案）。改成动态生成，以后加目标不会再漂。
-TARGET_LABEL = {"dsh": "DSH", "wb": "WorkBuddy", "zcode": "ZCode",
+TARGET_LABEL = {"dsh": "DSH", "wb": "WorkBuddy", "wbintl": "WorkBuddy Intl", "zcode": "ZCode",
                 "codex": "Codex", "cursor": "Cursor", "claude": "Claude Code",
                 "gemini": "Gemini CLI", "qwen": "Qwen Code", "iflow": "iFlow CLI",
                 "trae": "Trae", "codebuddy": "CodeBuddy", "opencode": "OpenCode",
@@ -6299,6 +6461,8 @@ def build_parser():
                         "默认关闭。会先备份 + node 语法校验，校验不过自动回滚）")
     p.add_argument("--wb-install", help="手动指定 WorkBuddy 安装目录")
     p.add_argument("--wb-data", help="手动指定 WorkBuddy 数据目录（.workbuddy）")
+    p.add_argument("--wbintl-install", help="手动指定 WorkBuddy 国际版安装目录（WorkBuddyAI.exe 那层）")
+    p.add_argument("--wbintl-data", help="手动指定国际版数据目录（.workbuddy-ai）")
     p.add_argument("--codex-dir", help="手动指定 Codex 配置目录（一般是 用户目录\\.codex）")
     p.add_argument("--cursor-dir", help="手动指定 Cursor 配置目录（一般是 用户目录\\.cursor）")
     p.add_argument("--claude-dir", help="手动指定 Claude 配置目录（一般是 用户目录\\.claude）")
