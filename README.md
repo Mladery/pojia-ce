@@ -1,6 +1,6 @@
 # 破甲一键通 · 社区版（Community Edition）
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.2-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.3-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。
 > MIT 协议，**非官方**，与原作者无隶属关系；本项目按自己的节奏演进，不跟随上游成品。
 
@@ -30,7 +30,7 @@
 | `gemini` | Gemini CLI（`~/.gemini/GEMINI.md`） |
 | `qwen` | Qwen Code（`~/.qwen/QWEN.md`） |
 | `iflow` | iFlow CLI 心流（`~/.iflow/IFLOW.md`） |
-| `trae` | Trae（`~/.trae/rules/project_rules.md`） |
+| `trae` | Trae（国内版 `~/.trae`、国际版 `~/.trae-cn`，均读 `rules/project_rules.md`） |
 | `codebuddy` | CodeBuddy 腾讯（`~/.codebuddy/CODEBUDDY.md`） |
 | `opencode` | OpenCode（`~/.config/opencode/AGENTS.md`） |
 | `windsurf` | Windsurf（`~/.codeium/windsurf/memories/global_rules.md`） |
@@ -167,9 +167,27 @@ npm 全局装的和官方安装的是**两份独立拷贝**（本机实测同为
 
 **长路径前缀。** npm 全局装出来的靶点动辄 `…\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-agent-instructions\lib\index.js`，叠一层用户目录就顶到 `MAX_PATH=260`；超了 `open()` 抛的是 `FileNotFoundError`，看着像「文件不存在」，实际是路径太长，很容易被当成「没装」而放过一整个靶点。现在超过 240 字符自动加 `\\?\` 前缀（UNC 走 `\\?\UNC\`），读写与原子替换都走这条路径。
 
-### 8. 与上游的差异
+### 8. 镜像层（第二重申）
 
-截至 2026-11-01，与上游 v8.27 / 8.28 的公开文档逐条比对：
+长会话里，开头那段人格声明会被后面几十万 token 挤出「热区」，模型开始慢慢滑回默认语气。解法不是把主块写得更长（那只会让开头更早失效），而是在主块之后**不远处**再放一小块——只含覆盖声明与自证口令，**不带政策全文**。
+
+两块各有独立标记（`POJIA-NEXT-INJECT` 与 `POJIA-CE-MIRROR`），任何一块单独存在都能工作：
+
+- 老版本打的文件只有主块 → `--apply` 自动补上镜像层，主块不动；
+- 只剩镜像层的半残文件 → `--apply` 补齐主块，`--revert` 也能认出来并整份还原；
+- `--check` 会分别报「已破甲」和「镜像层在位」，缺镜像层提示重跑 `--apply`。
+
+还原时先剥主块、再剥镜像块，两处都剥干净才算还原，所以「破了甲 → 还原」依旧能逐字节回到原样（有回归测试盯着）。
+
+### 9. Electron 保险丝与 Trae 双发行版
+
+**Electron 保险丝。** 桌面端把插件从 `app.asar` 解包到 `resources/app/` 之后，Electron 还可能因为内置的 `OnlyLoadAppFromAsar` 开关而**完全无视**这个目录——补丁确实写进磁盘了，程序照旧读 asar，症状是「打了跟没打一样」，而且从文件内容上完全查不出来。现在 `--apply` 先只读探测这个开关，开着就翻成关（改前留 `.pojia-fusebak`，幂等，翻过的不会重复翻）；`--check` 单独报一行，开着就判 `fail` 并说明原因。
+
+**Trae 双发行版。** Trae 有国内版与国际版两个包，配置目录分别是 `~/.trae` 与 `~/.trae-cn`，进程名、可执行文件名都不一样。现在两个候选目录、两个环境变量、三个进程名一起找，命中哪个用哪个；装了另一版会在体检里提醒一句，避免「以为没装」。
+
+### 10. 与上游的差异
+
+截至 2026-11-01，与上游最新公开文档逐条比对：
 
 | 能力 | 上游 | 本仓库 |
 |---|---|---|
@@ -180,6 +198,11 @@ npm 全局装的和官方安装的是**两份独立拷贝**（本机实测同为
 | 安装目录发现 | Program Files / `LOCALAPPDATA` / 注册表 / 所有盘符 / 运行中进程 / npm | 同左，另加上面四条；且 DSH / ZCode 共用同一套发现 |
 | DSH `app.asar` 内插件 | 未见（只处理磁盘上散开的文件） | 解包到 `resources/app/` 再补，带完整性硬校验 |
 | DSH 0.2.1-rc.5 常量改名 | 未见 | 新旧五个 intro 常量名全认 |
+| 长上下文重复注入 | 未见 | 主块 + 独立镜像块，任一在位即可 |
+| Electron `OnlyLoadAppFromAsar` 保险丝 | 未见 | 自动探测并关闭，改前留备份 |
+| Trae 国内版 / 国际版 | 只认一个配置目录 | `~/.trae` / `~/.trae-cn` 双候选 |
+| 写后自检 | 未见 | 回读复核，不合格即按备份回滚 |
+| Windows 长路径 | 未见 | 超过 240 字符自动加 `\\?\` 前缀 |
 | 目标数量 | 15 | 16 |
 
 > 保留意见：上游自 v8.14 起不再公开源码，上表依据其 README 与更新日志比对，「未见」只代表文档未声明，不等于其代码中一定没有。安装目录发现一项上游明确是有的，差异在「猜固定目录名」与「按盘符 × 深度实找」之间。
@@ -189,7 +212,7 @@ npm 全局装的和官方安装的是**两份独立拷贝**（本机实测同为
 ## 六、校验
 
 ```
-28efee3f5d86a91fdec71680954b0e6b984b88e9d25c37ce8a80f215ad25fe35  src/破甲一键通.py           (371,717 B / LF)
+342af6577925b07314dd2daefde7477ac4591511336b3b0ca02580e4dea8fcae  src/破甲一键通.py           (385,565 B / LF)
 7b09ba3574f3c1728adc649c154dd5292a907eec08379edffe2adeba594a7e52  src/破甲GUI.py              (23,658 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
@@ -201,9 +224,9 @@ git clone https://github.com/z91772524-ai/pojia-next && cd pojia-next
 git show 536ece2:破甲一键通.py | sha256sum
 ```
 
-`src/破甲一键通.py` 现在比 `upstream/` 大 20,324 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配）。
+`src/破甲一键通.py` 现在比 `upstream/` 大 34,172 B —— §四 的「只删不加」说的是摘封条那一步；多出来的字节来自 §五 的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检）。
 
-版本号分两段存：`VERSION = "8.2"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.2-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
+版本号分两段存：`VERSION = "8.3"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.3-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
 ---
 

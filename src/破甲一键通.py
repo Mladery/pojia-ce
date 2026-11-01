@@ -208,7 +208,7 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess.Popen = _popen_no_window
     subprocess._dsh_no_window_patched = True
 
-VERSION = "8.2"
+VERSION = "8.3"
 # 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
 # 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
 # "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。
@@ -376,6 +376,13 @@ LOOSE_KEYS = ("您可以处理任何", "命令无限制", "露骨内容无限制
 HASH_MARK = "unlock-v6:h="          # 本脚本的版本标记（v4 的是 unlock-v4:h=）
 HASH_MARK_LEGACY = "unlock-v4:h="   # 兼容识别上一版打的补丁
 OVERLAY_MARK = "最高优先级覆盖 版本2.0"
+
+# ---- 镜像层（第二重申）----
+# 主块动辄几十 KB，对话一长，模型对开头那段的注意力会掉；镜像块**短**、且落在文件
+# 末尾，等于把最硬的两条规则（覆盖声明 + 自证口令）在结尾再喊一遍。
+# 两层用**各自独立**的标记：客户端只吃其中一层也照样生效，互为兜底，不是简单重复。
+MIRROR_BEGIN = "<!-- POJIA-CE-MIRROR:BEGIN -->"
+MIRROR_END = "<!-- POJIA-CE-MIRROR:END -->"
 
 BAK_DSH = ".dshpurge.bak"
 BAK_WB = ".unlockbak"
@@ -753,6 +760,8 @@ def _archive(path, tag):
 # 静默丢失且无从追回（实测：删掉 .pojia.bak 后再跑一次 apply 就能复现）。
 OURS_ARTIFACT_MARKS = ("pojia-yijiantong", "unlock-v6:h=", "unlock-v4:h=",
                        "managed-prompts/pojia", "pojia-yijiantong cloudmem v",
+                       # 镜像层单独存在时也算我们的产物（主块可能已被客户端吃掉）
+                       "POJIA-CE-MIRROR:BEGIN",
                        # v7.8：Codex 走 config.toml 后，我们那个标记块也要能被认出来 ——
                        # 否则第二次 apply 时，带我们注入的 config.toml 会被当成"用户原版"存进备份。
                        "# >>> pojia-next begin")
@@ -1356,6 +1365,17 @@ def build_persona_text(user_prompt, target="DSH"):
             + pass_block(target).strip("\n").replace("\n", "\r\n"))
 
 
+def build_mirror_text(user_prompt, target="DSH"):
+    """镜像层正文：只放覆盖声明 + 自证口令，**不带政策全文**。
+
+    刻意做短：镜像层的任务不是重复整份人格，而是补「注意力衰减」—— 长对话里
+    开头那几 KB 最容易被忽略，而末尾这一段通常还在上下文窗口的热区。所以这里
+    只保留两条不能丢的：覆盖优先级、自证口令。
+    """
+    return (OVERLAY + "\r\n\r\n"
+            + pass_block(target).strip("\n").replace("\n", "\r\n"))
+
+
 def extract_mark_hash(text):
     for mark in (HASH_MARK, HASH_MARK_LEGACY):
         m = re.search(re.escape(mark) + r"([0-9a-f]{12})", text)
@@ -1636,7 +1656,122 @@ class DshTarget:
                 % (stats["lost"], "、".join(stats["lost_list"][:3])), "y", "dsh")
         log("  app.asar 已解包到 resources/app/（%d 个文件，删掉该目录即回滚）"
             % stats["ok"], "g", "dsh")
+        # 解包完成后再看保险丝：Electron 若烧死了 OnlyLoadAppFromAsar，它压根不认
+        # resources/app/，我们这一整套解包等于白做（表面"已写入·重启生效"，实际永不生效）。
+        cls._flip_only_asar_fuse(os.path.dirname(res_root))
         return cls._find_ai_under(app_dir)
+
+    # ---- Electron 保险丝（fuse）----
+    # 官方 fuse wire 格式：32 字节 sentinel + version(1) + length(1) + 每个熔丝 1 字节，
+    # '0'(0x30)=关 / '1'(0x31)=开。v1 顺序里第 5 位是 ONLY-LOAD-APP-FROM-ASAR。
+    _FUSE_SENTINEL = b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX"
+    _FUSE_ONLY_ASAR_IDX = 5
+
+    @staticmethod
+    def _install_root_of(base):
+        """从一个 @deepseek-ai 目录反推桌面端安装根；不是桌面端布局就返回 ""。
+
+        只认 `...\\resources\\app...` 这种形态：npm 全局装的、npx 缓存的都没有
+        resources 这一层，也就没有 Electron 保险丝可言，直接跳过。
+        """
+        p = os.path.normpath(base or "")
+        if not p:
+            return ""
+        k = p.lower().find(os.sep + "resources" + os.sep)
+        if k < 0:
+            return ""
+        root = p[:k]
+        return root if os.path.isdir(root) else ""
+
+    @classmethod
+    def fuse_state(cls, install_root):
+        """返回 {相对路径: 状态}，状态是 "on" / "off" / "short"。
+
+        只读，不动任何字节；--check 用它把"解包了却不生效"这种坑提前暴露出来。
+        """
+        out = {}
+        if not install_root or not os.path.isdir(install_root):
+            return out
+        for fp in cls._fuse_candidates(install_root):
+            try:
+                with open(_wp(fp), "rb") as fh:
+                    blob = fh.read()
+            except Exception:
+                continue
+            i = blob.find(cls._FUSE_SENTINEL)
+            if i < 0:
+                continue
+            w = i + len(cls._FUSE_SENTINEL)
+            if w + 2 + cls._FUSE_ONLY_ASAR_IDX >= len(blob):
+                continue
+            if blob[w + 1] <= cls._FUSE_ONLY_ASAR_IDX:
+                out[os.path.relpath(fp, install_root)] = "short"
+                continue
+            out[os.path.relpath(fp, install_root)] = \
+                "on" if blob[w + 2 + cls._FUSE_ONLY_ASAR_IDX] == 0x31 else "off"
+        return out
+
+    @staticmethod
+    def _fuse_candidates(install_root, max_depth=3):
+        """候选文件：安装根下 3 层内的 .exe / .dll / .bin（Electron 主程序与 runtime）。
+
+        只按名字筛会漏（有的发行版把主程序叫别的名），只按大小筛会扫整盘；
+        这里折中：限定后缀 + 限定深度，够覆盖所有正常安装形态。
+        """
+        for dirpath, dirs, files in os.walk(install_root):
+            rel = os.path.relpath(dirpath, install_root)
+            if rel != "." and rel.count(os.sep) >= max_depth:
+                dirs[:] = []
+                continue
+            for fn in files:
+                if fn.lower().endswith((".exe", ".dll", ".bin")):
+                    yield os.path.join(dirpath, fn)
+
+    @classmethod
+    def _flip_only_asar_fuse(cls, install_root):
+        """把 ONLY-LOAD-APP-FROM-ASAR 翻成"关"。幂等；改前留 .pojia-fusebak。
+
+        为什么非改不可：这个熔丝一开，Electron 只认 `resources/app.asar`，会
+        **无视** `resources/app/` 目录 —— 而本工具的整个 DSH 补丁都建立在那份
+        解包目录上。不改的话用户会看到"已写入，重启生效"，重启后行为一点没变。
+        """
+        if DRY_RUN or not os.path.isdir(install_root):
+            return 0
+        flipped = 0
+        for fp in cls._fuse_candidates(install_root):
+            try:
+                with open(_wp(fp), "rb") as fh:
+                    blob = fh.read()
+            except Exception:
+                continue
+            i = blob.find(cls._FUSE_SENTINEL)
+            if i < 0:
+                continue
+            w = i + len(cls._FUSE_SENTINEL)
+            if w + 2 + cls._FUSE_ONLY_ASAR_IDX >= len(blob):
+                continue
+            if blob[w + 1] <= cls._FUSE_ONLY_ASAR_IDX:
+                continue                      # 熔丝表长度不够，格式不对，别乱动
+            pos = w + 2 + cls._FUSE_ONLY_ASAR_IDX
+            if blob[pos] != 0x31:             # 本来就是关的
+                continue
+            bak = fp + ".pojia-fusebak"
+            if not os.path.exists(bak):
+                try:
+                    shutil.copyfile(_wp(fp), _wp(bak))
+                except Exception as e:
+                    log("  保险丝备份失败，跳过 %s：%s" % (os.path.basename(fp), e), "y", "dsh")
+                    continue
+            try:
+                with open(_wp(fp), "r+b") as fh:
+                    fh.seek(pos)
+                    fh.write(b"0")
+                flipped += 1
+                log("  已关闭 OnlyLoadAppFromAsar 保险丝：%s（原文件备份 .pojia-fusebak）"
+                    % os.path.relpath(fp, install_root), "g", "dsh")
+            except Exception as e:
+                log("  保险丝写入失败 %s：%s" % (os.path.basename(fp), e), "y", "dsh")
+        return flipped
 
     def find_bases(self, explicit=""):
         roots, seen = [], set()
@@ -2158,15 +2293,38 @@ class DshTarget:
                 st, _note = self.file_state(fp, funcs, want)
                 counts[st] = counts.get(st, 0) + 1
         n_ok = sum(v for k2, v in counts.items() if k2 in ("loose", "clean"))
-        n_bad = sum(v for k2, v in counts.items() if k2 not in ("loose", "clean"))
+        # manual 不是"没打上"，是"身份由 !!js 动态拼，改了会坏"，本来就不该算进失败项。
+        n_man = counts.get("manual", 0)
+        n_bad = sum(v for k2, v in counts.items()
+                    if k2 not in ("loose", "clean", "manual"))
         rows.append(("info", "安装 %d 套（%s）" % (len(bases), self.classify_install(bases[0])), ""))
         detail = "、".join("%s %d" % (k2, v) for k2, v in sorted(counts.items()))
+        _tail = (" / %d 需手动（!!js 动态身份）" % n_man) if n_man else ""
         if n_bad == 0:
-            rows.append(("ok", "靶点 %d 个：全部已生效" % n_ok, detail))
+            rows.append(("ok", "靶点 %d 个：%d 已生效%s" % (n_ok + n_man, n_ok, _tail), detail))
         else:
-            rows.append(("warn", "靶点 %d 个：%d 已生效 / %d 未生效" % (n_ok + n_bad, n_ok, n_bad), detail))
+            rows.append(("warn", "靶点 %d 个：%d 已生效 / %d 未生效%s"
+                         % (n_ok + n_man + n_bad, n_ok, n_bad, _tail), detail))
         st, note = passport_status(self.dsh_home(), self.key)
         rows.append(("own" if st == "current" else "info", "护照：%s" % note, ""))
+        # 保险丝：解包了 resources/app/ 但熔丝还开着 = 补丁永远不生效，必须报出来。
+        # 同一套安装会被多个 base 指到同一个根（app/ 与 app/dsh/ 都算），按根去重。
+        _seen_root = set()
+        for b in bases:
+            root = self._install_root_of(b)
+            if not root:
+                continue
+            _rk = os.path.normcase(os.path.abspath(root))
+            if _rk in _seen_root:
+                continue
+            _seen_root.add(_rk)
+            fs = self.fuse_state(root)
+            on = [k for k, v in fs.items() if v == "on"]
+            if on:
+                rows.append(("fail", "OnlyLoadAppFromAsar 保险丝是开着的 —— resources/app/ 会被无视",
+                             "受影响：" + "、".join(on[:3]) + "；重跑 --apply 会自动关掉（留 .pojia-fusebak）"))
+            elif fs:
+                rows.append(("ok", "Electron 保险丝正常（OnlyLoadAppFromAsar 已关）", ""))
         rows.extend(host_overwrite_rows(self.dsh_home(), "DSH"))
         procs = self.running()
         if procs:
@@ -2228,6 +2386,14 @@ class DshTarget:
         persona = build_persona_text(user)
         _pol, want = build_policy(user)
         log("人格来源：%s" % src, "dg", "dsh")
+
+        # 先把保险丝处理掉再打补丁：桌面端的 app.asar 没更新、resources/app/ 还能复用，
+        # 但熔丝可能在客户端升级时被重新烧上 —— 那种情况下我们一个字节都改不到它。
+        if mode != "revert":
+            for _b in bases:
+                _root = self._install_root_of(_b)
+                if _root:
+                    self._flip_only_asar_fuse(_root)
 
         if mode != "revert":
             running = self.running()
@@ -5817,6 +5983,10 @@ class _MarkBlockTarget:
 
     mark_begin = "<!-- POJIA-NEXT-INJECT:BEGIN -->"
     mark_end = "<!-- POJIA-NEXT-INJECT:END -->"
+    # 镜像层标记。子类不想要第二层就置 None（比如 config.toml 这种结构化配置：
+    # 镜像块只能落在它指向的指令文件里，不能塞进 TOML —— 见 CodexTarget）。
+    mirror_begin = MIRROR_BEGIN
+    mirror_end = MIRROR_END
     proc_names = ()
     # 桌面端 exe 名（有就填，用于「没检测到」时反查安装目录）。纯 CLI 目标留空。
     app_exe = ()
@@ -5859,8 +6029,43 @@ class _MarkBlockTarget:
     def _block(self, persona):
         return "%s\n%s\n%s\n" % (self.mark_begin, persona.rstrip(), self.mark_end)
 
+    def _mirror_block(self, persona=""):
+        """镜像块（独立标记）。正文由 build_mirror_text 出，不吃 persona 参数。"""
+        if not self.mirror_begin:
+            return ""
+        user, _src = load_user_persona("")
+        mt = build_mirror_text(user, self.label)
+        if not mt.strip():
+            return ""
+        return "%s\n%s\n%s\n" % (self.mirror_begin, mt.rstrip(), self.mirror_end)
+
+    def _merge_mirror(self, new, persona=""):
+        """把镜像块并入正文：已有旧镜像块就替换，没有就追加到末尾。
+
+        放在最后做：主块合并逻辑（替换/追加）只管主块，镜像层是叠加的第二层，
+        两者互不干扰 —— 任何一层被客户端吃掉，另一层还在。
+        """
+        if not self.mirror_begin:
+            return new
+        mb = self._mirror_block(persona)
+        if not mb:
+            return new
+        if self.mirror_begin in new:
+            i = new.find(self.mirror_begin)
+            j = new.find(self.mirror_end, i)
+            if j >= 0:
+                j += len(self.mirror_end)
+                head = new[:i].rstrip("\n")
+                tail = new[j:].lstrip("\n")
+                parts = [p for p in (head, mb.rstrip("\n"), tail) if p.strip()]
+                return "\n\n".join(parts).rstrip() + "\n"
+        return new.rstrip("\n") + "\n\n" + mb
+
     def _has_mark(self, text):
         return self.mark_begin in text
+
+    def _has_mirror(self, text):
+        return bool(self.mirror_begin) and (self.mirror_begin in text)
 
     @staticmethod
     def _strip_block(text, begin, end):
@@ -5914,7 +6119,10 @@ class _MarkBlockTarget:
             return {"fixed": 1}
 
         # 备份（只给"不是我们写的"原文件留备份，避免二次 apply 把我们的内容当原件存下来）
-        if os.path.exists(target) and old.strip() and not self._has_mark(old):
+        # 判据要连镜像层一起看：只剩镜像层的文件同样是我们的产物，给它留备份等于
+        # 把我们的字存成"用户原件"，--revert 时会把镜像层又还回去。
+        if os.path.exists(target) and old.strip() \
+                and not (self._has_mark(old) or self._has_mirror(old)):
             backup_file(target, bak_path=target + self.bak_suffix, is_pristine=_not_ours)
 
         new = self._merge(home, old, persona)
@@ -5956,16 +6164,18 @@ class _MarkBlockTarget:
         return ""
 
     def _merge(self, home, old, persona):
-        """把人格块并入原文件：已有块就替换，没有就追加到末尾。"""
+        """把人格块并入原文件：已有块就替换，没有就追加到末尾；最后叠镜像层。"""
         block = self._block(persona)
         if self._has_mark(old):
             head = old[:old.find(self.mark_begin)].rstrip("\n")
             tail = old[old.find(self.mark_end) + len(self.mark_end):].lstrip("\n")
             parts = [p for p in (head, block.rstrip("\n"), tail) if p.strip()]
-            return "\n\n".join(parts).rstrip() + "\n"
-        if not old.strip():
-            return block
-        return old.rstrip("\n") + "\n\n" + block
+            new = "\n\n".join(parts).rstrip() + "\n"
+        elif not old.strip():
+            new = block
+        else:
+            new = old.rstrip("\n") + "\n\n" + block
+        return self._merge_mirror(new, persona)
 
     def _do_strip(self, text, begin, end):
         """还原时用哪个剥离实现。
@@ -5989,15 +6199,18 @@ class _MarkBlockTarget:
         if old is None:
             log("读不了 %s —— 已跳过。" % target, "red", self.key)
             return {"err": 1}
-        if not old or not self._has_mark(old):
+        # 只有镜像块也算"我们写的" —— 主块可能已被客户端吃掉，这时更要能还原干净。
+        if not old or not (self._has_mark(old) or self._has_mirror(old)):
             log("  %s 里没有我们的标记块，无需还原。" % self.prompt_file, "dg", self.key)
             self.extra_reverts(home, args)
             return {"skip": 1}
         cur = self._do_strip(old, self.mark_begin, self.mark_end)
+        if self.mirror_begin:
+            cur = self._strip_block(cur, self.mirror_begin, self.mirror_end)
         bak = target + self.bak_suffix
         # 有备份且备份里没有我们的标记 → 用备份还原；否则只删块
         bak_txt = read_text_safe(bak)
-        if bak_txt and not self._has_mark(bak_txt):
+        if bak_txt and not (self._has_mark(bak_txt) or self._has_mirror(bak_txt)):
             write_text(target, bak_txt, make_dirs=True)
             log("  已从备份还原 %s" % self.prompt_file, "g", self.key)
         elif cur.strip():
@@ -6049,6 +6262,12 @@ class _MarkBlockTarget:
             rows.append(("warn", "%s 不存在（破甲后会新建）" % self.prompt_file, target))
         elif self._has_mark(txt):
             rows.append(("own", "%s 已破甲（含我们的标记块）" % self.prompt_file, target))
+            # 镜像层单独报：主块在、镜像块被人删了，行为上还生效，但兜底没了。
+            if self.mirror_begin:
+                if self._has_mirror(txt):
+                    rows.append(("info", "%s 镜像层在位（第二重申）" % self.prompt_file, ""))
+                else:
+                    rows.append(("warn", "%s 缺镜像层（重跑 --apply 补上）" % self.prompt_file, target))
         else:
             rows.append(("warn", "%s 存在但未破甲" % self.prompt_file, target))
         rows.extend(self.extra_checks(home, args))
@@ -6191,6 +6410,11 @@ class CodexTarget(_MarkBlockTarget):
     proc_names = ("codex.exe", "codex", "codex-code-mode-host.exe")
     mark_begin = CODEX_CFG_BEGIN
     mark_end = CODEX_CFG_END
+    # config.toml 里只放"指向指令文件的键"这一件事。镜像层不能塞进 TOML：
+    # 注释块虽然语法合法，但夹在顶层键之间会让键的归属变得可疑，还可能被
+    # 后面的 [表] 吃掉。镜像层改落在它指向的指令文件末尾（见 extra_writes）。
+    mirror_begin = None
+    mirror_end = None
     allow_delete_when_empty = False    # config.toml 删了 Codex 起不来，只清空不删除
 
     # ---------------- 定位 ----------------
@@ -6253,11 +6477,20 @@ class CodexTarget(_MarkBlockTarget):
         return ""
 
     def extra_writes(self, home, persona, args):
-        """写人格文件（config.toml 指向它），并顺手迁移旧方案。"""
+        """写人格文件（config.toml 指向它），并顺手迁移旧方案。
+
+        镜像层也落在这个文件里：config.toml 只留指向键，正文全在指令文件，
+        这样两层都能靠"删掉 managed-prompts 里的文件"一次性收干净。
+        """
         out = []
         dest = self._instr_path(home)
         try:
-            write_text(dest, persona + "\n", make_dirs=True)
+            body = persona.rstrip("\n") + "\n"
+            user, _s = load_user_persona(getattr(args, "persona", "") or "")
+            mt = build_mirror_text(user, self.label)
+            if mt.strip():
+                body += "\n%s\n%s\n%s\n" % (MIRROR_BEGIN, mt.rstrip(), MIRROR_END)
+            write_text(dest, body, make_dirs=True)
             out.append((dest, "  已写人格文件：managed-prompts\\%s" % CODEX_PROMPT_NAME))
         except Exception as e:
             out.append(("", "  [!] 写 managed-prompts 失败：%s" % e))
@@ -6373,8 +6606,11 @@ class CursorTarget(_MarkBlockTarget):
 
     def _rule_body(self, persona):
         """Cursor 的 .mdc 规则文件：front-matter **必须是文件第一行**，
-        否则 Cursor 不把这份文件当规则解析（踩过）。所以标记注释不能放最前面。"""
-        return ("---\n"
+        否则 Cursor 不把这份文件当规则解析（踩过）。所以标记注释不能放最前面。
+
+        镜像层跟在主块后面（同一份 .mdc 里的第二段），两层标记各自独立。
+        """
+        body = ("---\n"
                 "description: 破甲人格（pojia-next 注入）\n"
                 "globs: \n"
                 "alwaysApply: true\n"
@@ -6382,6 +6618,7 @@ class CursorTarget(_MarkBlockTarget):
                 + self.mark_begin + "\n"
                 + persona.rstrip() + "\n"
                 + self.mark_end + "\n")
+        return self._merge_mirror(body, persona)
 
     def _do_strip(self, text, begin, end):
         """还原时连**我们自己写的 front-matter** 一起收掉。
@@ -6391,6 +6628,8 @@ class CursorTarget(_MarkBlockTarget):
         只在前面的 front-matter 确实是我们那份（含 pojia-next）时才收。
         """
         rest = self._strip_block(text, begin, end)
+        if self.mirror_begin:                       # 镜像层一并收掉
+            rest = self._strip_block(rest, self.mirror_begin, self.mirror_end)
         s = rest.lstrip("\n")
         if s.startswith("---"):
             j = s.find("\n---", 3)
@@ -6413,6 +6652,7 @@ class CursorTarget(_MarkBlockTarget):
                 t = read_text_safe(legacy) or ""
                 if self.mark_begin in t:
                     new = self.mark_begin + "\n" + persona.rstrip() + "\n" + self.mark_end + "\n"
+                    new = self._merge_mirror(new, persona)
                     write_text(legacy, new)
                     out.append((legacy, "  已同步旧版 .cursorrules"))
             except Exception as e:
@@ -6423,8 +6663,10 @@ class CursorTarget(_MarkBlockTarget):
         legacy = os.path.join(home, CURSOR_LEGACY_RULE)
         if os.path.exists(legacy):
             t = read_text_safe(legacy) or ""
-            if self.mark_begin in t:
+            if self.mark_begin in t or self._has_mirror(t):
                 cur = self._strip_block(t, self.mark_begin, self.mark_end)
+                if self.mirror_begin:
+                    cur = self._strip_block(cur, self.mirror_begin, self.mirror_end)
                 if cur.strip():
                     write_text(legacy, cur)
                 else:
@@ -6579,32 +6821,60 @@ class TraeTarget(_MarkBlockTarget):
     key = "trae"
     label = "Trae"
     home_name = ".trae"
+    # Trae 有两个发行版，配置目录名不一样：
+    #   国际版（trae.ai）→ ~/.trae
+    #   国内版（trae.cn）→ ~/.trae-cn
+    # 只认 .trae 的话，只装国内版的用户会被判成"未安装"，白跑一趟。
+    _HOME_CANDS = (".trae", ".trae-cn")
     prompt_file = os.path.join("rules", "project_rules.md")
     bak_suffix = BAK_MARK
     arg_name = "trae_dir"
-    env_vars = ("TRAE_HOME",)
-    proc_names = ("Trae.exe", "Trae")
-    app_exe = ("Trae.exe",)
+    env_vars = ("TRAE_HOME", "TRAE_CN_HOME")
+    proc_names = ("Trae.exe", "Trae", "Trae CN.exe")
+    app_exe = ("Trae.exe", "Trae CN.exe")
+
+    def resolve_home(self, explicit=""):
+        """先按常规走（--trae-dir / 手动路径 / 环境变量），落空再挑实际存在的发行版目录。"""
+        h = super().resolve_home(explicit)
+        if os.path.isdir(h):
+            return h
+        home = os.path.expanduser("~")
+        for name in self._HOME_CANDS:
+            cand = os.path.join(home, name)
+            if os.path.isdir(cand):
+                return cand
+        return h
 
     def pick_title(self):
-        return "选择 Trae 的配置目录（一般是 用户目录\\.trae）"
+        return "选择 Trae 的配置目录（一般是 用户目录\\.trae 或 .trae-cn）"
 
     def pick_hint(self):
         return os.path.expanduser("~")
 
     def resolve_pick(self, path):
         p = os.path.normpath(os.path.expanduser(path))
-        if os.path.basename(p).lower() == ".trae":
+        if os.path.basename(p).lower() in self._HOME_CANDS:
             return p, ""
-        cand = os.path.join(p, ".trae")
-        if os.path.isdir(cand):
-            return cand, ""
+        for name in self._HOME_CANDS:
+            cand = os.path.join(p, name)
+            if os.path.isdir(cand):
+                return cand, ""
         if os.path.isdir(os.path.join(p, "rules")):
             return p, ""
-        return "", "这里不像 Trae 配置目录。要选 .trae 那一层（里面通常有 rules\\）。"
+        return "", "这里不像 Trae 配置目录。要选 .trae 或 .trae-cn 那一层（里面通常有 rules\\）。"
 
     def extra_checks(self, home, args):
-        return [("info", "提示：Trae 还读各工程 .trae\\rules\\，本工具只处理用户级", "")]
+        rows = [("info", "提示：Trae 还读各工程 .trae\\rules\\，本工具只处理用户级", "")]
+        # 另一个发行版也装了的话，明确提示"这套没打" —— 否则用户会以为全覆盖了。
+        other = [n for n in self._HOME_CANDS
+                 if os.path.isdir(os.path.join(os.path.expanduser("~"), n))
+                 and os.path.normcase(os.path.join(os.path.expanduser("~"), n)) != os.path.normcase(home)]
+        if other:
+            rows.append(("warn", "另装了 Trae 发行版：%s（当前只处理 %s）"
+                         % ("、".join(other), os.path.basename(home)),
+                         "要一并处理：--apply --target trae --trae-dir %s"
+                         % os.path.join(os.path.expanduser("~"), other[0])))
+        return rows
 
 
 class CodeBuddyTarget(_MarkBlockTarget):
@@ -6941,7 +7211,7 @@ def run_status(args, targets=None, allow_ask=False):
     global READONLY
     READONLY = True                       # v7.9：只读入口自己声明，见 log() 处说明
     targets = targets or resolve_targets(args.target)
-    header("状态检测（只读）", "所有目标共用一套人格 / v%s 起带自证口令" % VER_TAG)
+    header("状态检测（只读）", "所有目标共用一套人格 / 自带自证口令")
     for k in targets:
         t = TARGETS[k]()
         if allow_ask:
