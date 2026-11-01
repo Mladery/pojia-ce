@@ -272,7 +272,7 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 - **能**：文件属性页显示发布者名字，不再是「未知发布者」；本机把根证书加进信任后 `Get-AuthenticodeSignature` 就是 `Valid`；自己机器和企业内分发时少挨一次 SmartScreen 首次拦截。
 - **不能**：对**别人的**电脑没有任何信誉作用。自签根不在他们的信任列表里，照样弹「未知发布者」，SmartScreen 也不会因此放行。要让陌生人的机器不报警，只有买 CA 的 OV/EV 证书一条路。
 
-两个脚本：
+三个脚本：
 
 ```powershell
 # 生成（默认 RSA 4096 / SHA-256 / 10 年；-Trust 顺带让本机信任）
@@ -280,6 +280,9 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 
 # 签名（不传 -Password 就从 pfx 同目录的密码文件读）
 .\tools\sign-windows.ps1 -Exe build\dist\pojia-ce.exe -Pfx D:\certs\pojia-signing.pfx
+
+# 验签（比对仓库里钉定的公钥证书，不通过退出码 1）
+.\tools\verify-windows.ps1 -Exe pojia-ce-windows-x64.exe
 ```
 
 **为什么不用 makecert + cert2spc。** 那套 1998 年的工具只能出 MD5 签名、1024 位、且没有 CodeSigning EKU 的证书，现代 Windows 根本不认 —— `signtool sign` 会直接报 `No certificates were found that met all the given criteria`，因为它连选都不会选这张证书。`New-SelfSignedCertificate` 才能出 SHA-256 + RSA 4096 + 正确 EKU 的。
@@ -292,6 +295,10 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 | `WINDOWS_SIGNING_PFX_PASSWORD` | pfx 密码 |
 
 两个都没配就自动跳过，产物照发，只是显示「未知发布者」——不会让流水线变红。签名步骤放在冒烟之前，这样万一签名把 exe 弄坏了，冒烟能立刻抓到。
+
+**公钥证书要入库，私钥不要。** `tools/codesign/pojia-signing.cer` 是刻意提交的 —— 它是验签的锚点，没有它，用户验签时还是得回头信任发布页，签名就真只剩装逼了。`.gitignore` 里 `*.cer` 挡全局、`!tools/codesign/*.cer` 开一个口子；`.pfx` / `.pvk` 一个都不放。
+
+CI 签完会直接调 `tools/verify-windows.ps1` 复验一遍。这一步不只是确认签上了，还在**核对两个来源**：secret 里的 pfx 和仓库钉的公钥证书必须是同一张。哪天证书轮换了却忘了同步 `tools/codesign/`，构建当场红，而不是等到用户验签失败才发现。
 
 ### 14. 与上游的差异
 
@@ -340,6 +347,38 @@ git show 536ece2:破甲一键通.py | sha256sum
 
 版本号分两段存：`VERSION = "8.5"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.5-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
+### 产物校验（两条独立通道）
+
+源码用上面的哈希校验。**下载的可执行文件用另一套**，因为哈希和文件在同一处发布 —— 能改仓库的人可以同时改掉两者，那不叫交叉验证。
+
+**通道一：签名 + 仓库钉定的公钥证书（Windows）。** 私钥只在发布者手里，伪造不出签名。锚点证书就放在仓库里：
+
+```
+tools/codesign/pojia-signing.cer
+  主题     : CN=Mladery, O=Mladery CE, C=CN
+  SHA-256  : ee95267b61a4965829338d80a792d3b3810d6b0c2d8045d6842ce1fb22c8e413
+  有效期至 : 2036-11-01（RSA 4096 / SHA-256）
+```
+
+```powershell
+.\tools\verify-windows.ps1 -Exe pojia-ce-windows-x64.exe
+# [ OK ] 签名者与锚点证书一致 → 退出码 0
+# [FAIL] 签名者不是仓库里钉的那张证书 → 退出码 1
+```
+
+脚本比对的是**整张证书的 SHA-256**，不是主题名 —— 主题名谁都能写，指纹不能。自己手动看也行：文件属性 → 数字签名 → 详细信息，签名者应是 `Mladery`；或者 `Get-AuthenticodeSignature` 看 `SignerCertificate` 的指纹。
+
+链状态显示 `UnknownError` 是正常的：自签根没装进你的信任存储。这不影响「签名有效且来自这张证书」这个结论 —— 想让状态变成 `Valid`，把 `tools/codesign/pojia-signing.cer` 导入「受信任的根证书颁发机构」。
+
+**通道二：SHA256SUMS.txt（全平台）。** 每次构建由 `checksums` job 汇总四个产物生成，打 tag 时随 Release 一起发：
+
+```bash
+sha256sum -c SHA256SUMS.txt        # Linux
+shasum -a 256 -c SHA256SUMS.txt    # macOS
+```
+
+Linux / macOS 的产物没有签名（`codesign` / `gpg` 那套要另外的证书和流程），所以对它们来说这份校验和就是唯一的完整性凭据。
+
 ---
 
 ## 七、仓库内容
@@ -352,7 +391,8 @@ upstream/破甲一键通.v8.14.py    上游 536ece2 的原始核心，未改动�
 tests/                         测试：标记块往返 / 保险丝 / 目标注册表 / 命令行冒烟
 .github/workflows/ci.yml       CI：三平台 × 多 Python 版本跑一遍
 .github/workflows/build.yml    Build：四个平台打单文件可执行文件，打 tag 发 Release
-tools/                         签名工具：生成自签证书 / 给产物签名（PowerShell）
+tools/                         签名工具：生成证书 / 签名 / 验签
+tools/codesign/                验签锚点：公钥证书（只有公钥，可以公开）
 evidence/                      取证材料：提交时间线、群聊记录、防二改机制拆解
 ```
 

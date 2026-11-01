@@ -14,7 +14,7 @@ import sys
 
 import pytest
 
-from conftest import CORE_PATH, GUI_PATH, README_PATH
+from conftest import CORE_PATH, GUI_PATH, README_PATH, ROOT
 
 
 def sha256(path):
@@ -119,3 +119,32 @@ def test_only_stdlib_imports(core):
 
     third = sorted(m for m in mods if m not in std)
     assert not third, "引了第三方库：%s" % third
+
+
+def test_codesign_anchor_matches_readme():
+    """验签锚点证书的 SHA-256 必须和 README 里写的一致。
+
+    这条挡的是「证书轮换了、README 没跟上」—— 用户照着 README 的指纹去比对，
+    结果对不上，会以为自己下到了假货。没启用签名（仓库里没有 .cer）时跳过。
+    """
+    cer = os.path.join(ROOT, "tools", "codesign", "pojia-signing.cer")
+    if not os.path.isfile(cer):
+        pytest.skip("仓库里没有验签锚点证书，跳过")
+
+    actual = sha256(cer)
+    with open(README_PATH, encoding="utf-8") as f:
+        text = f.read()
+    assert actual in text, (
+        "README 里记的锚点证书 SHA-256 与实际不一致：\n  实际: %s\n"
+        "换证书后记得同步 README §六。" % actual)
+
+
+def test_codesign_private_key_never_committed():
+    """私钥绝不能出现在工作区里 —— 哪怕被 .gitignore 挡着也不该放在仓库目录。"""
+    bad = []
+    for dirpath, dirs, files in os.walk(ROOT):
+        dirs[:] = [d for d in dirs if d not in (".git", "build", "dist", "__pycache__")]
+        for fn in files:
+            if fn.lower().endswith((".pfx", ".pvk", ".p12")):
+                bad.append(os.path.join(dirpath, fn))
+    assert not bad, "工作区里出现了私钥文件：%s" % bad

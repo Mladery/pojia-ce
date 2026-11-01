@@ -95,13 +95,11 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { throw "签名失败（signtool 退出码 $LASTEXITCODE）" }
 
-          # runner 上没有这张自签根，链验证必然失败 —— 这里只确认「签名确实嵌进去了、
-          # 且是预期那张证书签的」。别用 signtool verify /pa 卡自己。
-          $sig = Get-AuthenticodeSignature -LiteralPath $exe
-          Write-Host ("签名者: " + $sig.SignerCertificate.Subject)
-          Write-Host ("状态  : " + $sig.Status + "（自签根不在 runner 上，非 Valid 属正常）")
-          if ($sig.SignatureType -ne "Authenticode") { throw "签名类型不对: $($sig.SignatureType)" }
-          if ($sig.SignerCertificate.Subject -notmatch "Mladery") { throw "签名者不是预期证书" }
+          # 用仓库里那份验签脚本，而不是在这里重写一遍比对逻辑 —— 让 CI 走的就是
+          # 用户拿到手会走的那条路。顺带把「secret 里的 pfx」和「仓库钉的公钥证书」
+          # 对一次：证书轮换了却忘了更新 tools/codesign/，这里立刻红。
+          & .\tools\verify-windows.ps1 -Exe $exe
+          if ($LASTEXITCODE -ne 0) { throw "验签不通过：签名者与仓库钉定的证书不一致" }
           Write-Host "签名 OK"
 
       - name: 冒烟：产物能跑、版本号对
@@ -162,3 +160,45 @@ jobs:
             || gh release create "$TAG" --title "$TAG" --generate-notes \
             || true
           gh release upload "$TAG" "out/$BIN_NAME-${{ matrix.asset }}${{ matrix.ext }}" --clobber
+
+  # 四个平台的产物汇总成一份校验和。Windows 走签名验签，另外三个平台只有
+  # SHA-256 这一条路 —— 所以这份文件是它们唯一的完整性凭据。
+  checksums:
+    name: checksums
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 生成 SHA256SUMS.txt
+        run: |
+          cd artifacts
+          ls -la
+          sha256sum ./* > SHA256SUMS.txt
+          echo "---- SHA256SUMS.txt ----"
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 校验和也发到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --generate-notes \
+            || true
+          gh release upload "$TAG" artifacts/SHA256SUMS.txt --clobber
