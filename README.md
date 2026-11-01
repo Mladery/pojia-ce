@@ -1,5 +1,7 @@
 # 破甲一键通 · 社区版（Community Edition）
 
+[![CI](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml)
+
 > 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.4-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。
 > MIT 协议，**非官方**，与原作者无隶属关系；本项目按自己的节奏演进，不跟随上游成品。
@@ -198,7 +200,26 @@ Kiro 是 VS Code 派生，但它**没有** `CLAUDE.md` / `AGENTS.md` 那种「�
 
 顺带修掉一个存在很久的坑：**十个 `--<key>-dir` 参数根本没注册**。`--gemini-dir` / `--trae-dir` / `--cline-dir` / `--kiro-dir` 这些在提示文案里写着「装了就用它指定」，实际 argparse 里没有，照着敲只会得到 `unrecognized arguments`——越按提示走越进不去。现在按目标表兜底注册，以后加目标自动就有参数。同一处还有一句把**环境变量**写成命令行参数的提示（`QWEN_CONFIG_DIR` → `--qwen-config-dir`），一并改成「`--pick` / `--<key>-dir` 是参数，剩下的是要 export 的环境变量」。
 
-### 11. 与上游的差异
+### 11. 自动化测试
+
+改动最怕的不是写错，是**写错了没人发现**：这个脚本直接改用户的配置文件，一个标记块少闭合一行，用户的原文就被吃掉；一次合并逻辑退化成叠加，二次 `--apply` 就把文件撑成两倍。这类问题不会报错，只会静默地坏。
+
+所以补了一套测试，CI 在 Ubuntu / Windows / macOS 上各跑一遍，Python 3.8（声明的最低版本）到 3.13：
+
+| 文件 | 管什么 |
+|---|---|
+| `tests/test_markblock.py` | 标记块 + 镜像层的合并 / 剥离，逐字节往返；二次 apply 幂等；只剩镜像层时能自愈 |
+| `tests/test_roundtrip.py` | 真实 apply → revert，必须回到用户原文；备份必须是原件；Kiro 的 steering 目录能自动建 |
+| `tests/test_fuse.py` | Electron 保险丝：定位、翻转、只动目标位、留备份、幂等 |
+| `tests/test_targets.py` | 目标注册表一致性 —— 别名指向真目标、每个 `--<key>-dir` 真的注册了、GUI 列表与核心同步 |
+| `tests/test_cli.py` | 黑盒冒烟：干净机器上 `--status` / `--check` / `--apply` / `--revert` / `--dry-run` 都不崩 |
+| `tests/test_repo.py` | 仓库自己别撒谎：语法能过、LF 一致、README 记的哈希等于真实哈希、不出现上游版本号、只引标准库 |
+
+`test_targets.py` 和 `test_repo.py` 那两组不是功能测试，是**把踩过的坑钉成断言**：`--<key>-dir` 漏注册十个参数、GUI 目标列表硬编码不同步、README 哈希过期 —— 这些都真的发生过，而且都不会自己暴露。
+
+全部用例只在临时目录里操作，不碰真实 `~`，也不要求装了任何客户端，所以干净机器和 CI 上都能跑完。
+
+### 12. 与上游的差异
 
 截至 2026-11-01，与上游最新公开文档逐条比对：
 
@@ -252,8 +273,19 @@ LICENSE                        上游 MIT 原文，未改动（Copyright (c) 202
 src/破甲一键通.py               纯净版核心：摘掉 16 个加密封条函数，可直接跑
 src/破甲GUI.py                  图形界面：本机网页 UI，零依赖
 upstream/破甲一键通.v8.14.py    上游 536ece2 的原始核心，未改动，用于比对
+tests/                         测试：标记块往返 / 保险丝 / 目标注册表 / 命令行冒烟
+.github/workflows/ci.yml       CI：三平台 × 多 Python 版本跑一遍
 evidence/                      取证材料：提交时间线、群聊记录、防二改机制拆解
 ```
+
+跑测试只需要 pytest（脚本本身零依赖）：
+
+```bash
+python -m pip install pytest
+python -m pytest tests -q
+```
+
+测试全部在临时目录里操作，**不碰真实的 `~`**，也不要求装了任何客户端 —— 干净机器上照样能跑完。
 
 **注意同名**：上游发行包里的 `破甲GUI.py` 和本仓库的 `src/破甲GUI.py` **只是重名，不是同一份代码**，两者没有任何继承关系。
 
