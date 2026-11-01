@@ -1387,6 +1387,25 @@ class DshTarget:
     label = "DSH (DeepSeek Harness)"
     bak_suffix = BAK_DSH
 
+    # v8.2-CE：四源发现的来源标注（--status 显示，定位错了能立刻看出是哪一层判断的）
+    found_by = ""
+    found_base = ""
+    DSH_EXE_NAMES = ("DSH Desktop.exe", "DeepSeek Harness.exe")
+
+    @classmethod
+    def _looks_like_app_root(cls, d):
+        """一个目录是不是 DSH 桌面端的安装根（给四源发现当判据用）。"""
+        if not d or not os.path.isdir(d):
+            return False
+        for exe in cls.DSH_EXE_NAMES:
+            if os.path.isfile(os.path.join(d, exe)):
+                return True
+        return any(os.path.isdir(os.path.join(d, *s.split("/"))) for s in
+                   ("resources/app/node_modules/@deepseek-ai",
+                    "resources/app/dsh/node_modules/@deepseek-ai",
+                    "resources/app.asar.unpacked/node_modules/@deepseek-ai",
+                    "node_modules/@deepseek-ai"))
+
     # ---------------- 安装定位 ----------------
     def pick_title(self):
         return "选择 DSH 的安装目录（DSH Desktop 根目录，或者 node_modules\\@deepseek-ai）"
@@ -1524,6 +1543,7 @@ class DshTarget:
 
     def find_bases(self, explicit=""):
         roots, seen = [], set()
+        self.found_by, self.found_base = "", ""
 
         def add(p):
             p = os.path.normpath(p) if p else ""
@@ -1615,6 +1635,17 @@ class DshTarget:
                     if ai:
                         add(ai)
 
+        # 2c) 四源发现·廉价三通道（v8.2-CE）：进程反查 / 切换工具配置 / 快捷方式
+        #     上面 2) 2b) 全是在「猜固定目录名」，用户把 DSH 装到 H:\DSH Desktop 这种
+        #     自定义一级目录时一个都命中不了。这三层只读现成记录，很快；
+        #     实扫盘的那一层放到最后兜底，免得 npm 装的用户白等几秒。
+        if not roots:
+            app, src = discover_app_root(self.DSH_EXE_NAMES, self._looks_like_app_root,
+                                         walk=False)
+            if app:
+                self.found_by, self.found_base = src, app
+                self._absorb_app_root(add, app)
+
         # 3) npm 全局
         # v7.5：**只有前面一无所获时**才去 spawn npm。两个好处：
         #   ① 快（npm 启动在 Windows 上要 1-2 秒，而桌面端那几条路径通常一次命中）；
@@ -1640,7 +1671,31 @@ class DshTarget:
         self._add_running_npx(add)
         # 5) 便携版
         add(os.path.join(home, ".dsh", "node_modules", "@deepseek-ai"))
+
+        # 6) 兜底：有界遍历（实扫盘，最慢）。前五层一无所获才走到这里 ——
+        #    用 npm 装的用户在第 3 步就命中，不会白等这几秒。
+        if not roots:
+            app = ""
+            for exe in self.DSH_EXE_NAMES:
+                app = find_install_by_walk(exe, self._looks_like_app_root)
+                if app:
+                    break
+            if app:
+                self.found_by, self.found_base = "目录遍历", app
+                self._absorb_app_root(add, app)
         return roots
+
+    def _absorb_app_root(self, add, app):
+        """把一个 DSH 桌面端安装根解析成 @deepseek-ai 目录（含 asar 解包后的插件）。"""
+        for sub in ("resources/app/node_modules/@deepseek-ai",
+                    "resources/app/dsh/node_modules/@deepseek-ai",
+                    "Contents/Resources/app/node_modules/@deepseek-ai",
+                    "resources/app.asar.unpacked/node_modules/@deepseek-ai",
+                    "node_modules/@deepseek-ai"):
+            add(os.path.join(app, *sub.split("/")))
+        ai = self.asar_extract_agent_dir(os.path.join(app, "resources"))
+        if ai:
+            add(ai)
 
     def _add_npx_candidates(self, add, home):
         caches = []
@@ -1897,23 +1952,37 @@ class DshTarget:
         js_funcs = [self.patch_intro_consts, self.patch_disclaimer, self.patch_persona_sections]
         try:
             import glob as _g
-            for pattern in ("dsh-agent-instructions/lib/*.js", "dsh-agent-instructions/**/*.js"):
+            # v8.2-CE：npm 全局装出来的布局是
+            #   node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-agent-instructions\…
+            # 插件比 base 低两层，而原来的 glob 只认「插件就在 base 下面」这一种，
+            # 于是明明装了 DSH 却报「目标 0 个 / 可能 DSH 没装」（本机实测踩到）。
+            # 每条规则都补一份「隔一层 dsh 包」的写法，两种布局共用同一套判据。
+            _NP = "*/node_modules/@deepseek-ai/"
+            for pattern in ("dsh-agent-instructions/lib/*.js",
+                            "dsh-agent-instructions/**/*.js",
+                            _NP + "dsh-agent-instructions/lib/*.js",
+                            _NP + "dsh-agent-instructions/**/*.js"):
                 for p in _g.glob(os.path.join(base_p, *pattern.split("/")), recursive=True):
                     if os.path.isfile(p):
                         add(p, js_funcs)
-            for p in _g.glob(os.path.join(base_p, "dsh-agent-presets", "presets", "*", "agent.cordis.yml")):
-                add(p, ["persona"])
-            for p in _g.glob(os.path.join(base_p, "*", "cordis.patch.yml")):
-                raw = read_text_safe(p) or ""
-                if ("personaPrefix" in raw) or ("You are a coding agent" in raw) or is_loose_text(raw):
-                    add(p, self._pick_persona_funcs(raw))
-            for p in _g.glob(os.path.join(base_p, "*", "agent.cordis.yml")):
-                raw = read_text_safe(p) or ""
-                # ⚠ 原实现只看 "You are a coding agent"/personaPrefix，打完补丁这两个都没了，
-                #   于是 revert 时收不到这个文件 -> 还原不干净。这里补上"已打补丁"的判据。
-                if ("You are a coding agent" in raw) or ("personaPrefix" in raw) \
-                        or ("prefix:" in raw) or is_loose_text(raw):
-                    add(p, self._pick_persona_funcs(raw))
+            for pattern in ("dsh-agent-presets/presets/*/agent.cordis.yml",
+                            _NP + "dsh-agent-presets/presets/*/agent.cordis.yml"):
+                for p in _g.glob(os.path.join(base_p, *pattern.split("/")), recursive=True):
+                    if os.path.isfile(p):
+                        add(p, ["persona"])
+            for pattern in ("*/cordis.patch.yml", _NP + "*/cordis.patch.yml"):
+                for p in _g.glob(os.path.join(base_p, *pattern.split("/")), recursive=True):
+                    raw = read_text_safe(p) or ""
+                    if ("personaPrefix" in raw) or ("You are a coding agent" in raw) or is_loose_text(raw):
+                        add(p, self._pick_persona_funcs(raw))
+            for pattern in ("*/agent.cordis.yml", _NP + "*/agent.cordis.yml"):
+                for p in _g.glob(os.path.join(base_p, *pattern.split("/")), recursive=True):
+                    raw = read_text_safe(p) or ""
+                    # ⚠ 原实现只看 "You are a coding agent"/personaPrefix，打完补丁这两个都没了，
+                    #   于是 revert 时收不到这个文件 -> 还原不干净。这里补上"已打补丁"的判据。
+                    if ("You are a coding agent" in raw) or ("personaPrefix" in raw) \
+                            or ("prefix:" in raw) or is_loose_text(raw):
+                        add(p, self._pick_persona_funcs(raw))
         except Exception as e:
             log("枚举目标失败: %s" % e, "red", "dsh")
 
@@ -1999,7 +2068,8 @@ class DshTarget:
         rows = []
         for b in bases:
             tg = self.collect_targets(b)
-            log("· %s  [%s]  目标 %d 个" % (b, self.classify_install(b), len(tg)), "", "dsh")
+            _src = ("  ← %s" % self.found_by) if (self.found_by and b == self.found_base) else ""
+            log("· %s  [%s]  目标 %d 个%s" % (b, self.classify_install(b), len(tg), _src), "", "dsh")
             for fp, funcs in tg:
                 st, note = self.file_state(fp, funcs, want)
                 bak = self.backup_path_for(fp)
@@ -2574,6 +2644,80 @@ def find_install_by_walk(exe_name, judge, max_depth=3, budget=8.0, cap=40000):
                     nxt.append(e.path)
         level = nxt
     return ""
+
+
+def find_install_via_process(exe_name, judge):
+    """从运行中的进程命令行反查安装根。
+
+    比快捷方式更准 —— 命令行里是**当前真正在跑的那个** exe 的绝对路径。
+    用户装了三个版本、开的是哪一个，这一层就直接命中哪一个。
+    """
+    want = exe_name.lower()
+    for _pid, _name, cmd in list_processes():
+        if not cmd or want not in cmd.lower():
+            continue
+        for m in re.finditer(r'([A-Za-z]:\\[^"]{0,240}?)\\' + re.escape(exe_name), cmd, re.I):
+            cur = m.group(1)
+            for _ in range(5):                    # exe 可能在 bin 子目录，向上找安装根
+                if cur and os.path.isdir(cur) and judge(cur):
+                    return cur
+                parent = os.path.dirname(cur)
+                if not parent or parent == cur:
+                    break
+                cur = parent
+    return ""
+
+
+_APP_ROOT_CACHE = {}
+
+
+def discover_app_root(exe_names, judge, depth=3, budget=8.0, cache_sec=180, walk=True):
+    """四源定位一个桌面应用的安装根，返回 (目录, 来源)。
+
+    顺序按「准、快、省」排：
+      进程反查   —— 正在跑的那个，最准，纯内存查询
+      切换工具配置 —— wb-switch / cc-switch 里存着各版本绝对路径
+      快捷方式   —— 开始菜单 / 桌面 .lnk 里存着 exe 绝对路径
+      有界遍历   —— 前三层都是「读现成记录」，都没有才实扫，所以放最后
+
+    `exe_names` 可以给多个别名（同一个产品的不同 exe 名），逐个试。
+    `walk=False` 时跳过实扫 —— 只想知道「装没装」的场景用这个，快得多。
+    结果按 exe 名缓存，避免 --status 里每个目标各扫一遍盘。
+    """
+    if isinstance(exe_names, str):
+        exe_names = (exe_names,)
+    ck = tuple(exe_names) + (bool(walk),)
+    hit = _APP_ROOT_CACHE.get(ck)
+    if hit and (time.time() - hit[0]) < cache_sec:
+        return hit[1], hit[2]
+
+    root, src = "", ""
+    for exe in exe_names:
+        root = find_install_via_process(exe, judge)
+        if root:
+            src = "进程反查"
+            break
+    if not root:
+        for exe in exe_names:
+            root = find_install_via_switch(exe, judge)
+            if root:
+                src = "切换工具配置"
+                break
+    if not root:
+        for exe in exe_names:
+            root = find_install_via_shortcuts(exe, judge)
+            if root:
+                src = "快捷方式"
+                break
+    if not root and walk:
+        for exe in exe_names:
+            root = find_install_by_walk(exe, judge, max_depth=depth, budget=budget)
+            if root:
+                src = "目录遍历"
+                break
+
+    _APP_ROOT_CACHE[ck] = (time.time(), root, src)
+    return root, src
 
 
 # ── 会话快照（WorkBuddy 每次启动写在 TEMP 里的产品配置副本）──────────────────
@@ -4639,6 +4783,8 @@ ZCODE_MEM_FILE = "pojia-yijiantong.md"
 ZCODE_MEM_DIRS = ("cli/memories/global/memory", "memories/global/memory")
 ZCODE_SKILL_DIRS = ("skills", os.path.join(".agents", "skills"))
 ZCODE_SYS_PROMPT_REL = os.path.join("resources", "glm", "zcode.cjs")
+# 四源发现命中的来源（给 --status 显示；find_zcode_cjs 是纯函数，只能靠模块级变量带回）
+_ZCODE_SRC = {"src": "", "app": ""}
 ZCODE_MARK = "pojia-yijiantong zcode"
 
 
@@ -4702,6 +4848,19 @@ def find_zcode_cjs(explicit=""):
     for c in cands:
         if os.path.isfile(c):
             return c
+
+    # 3.5) 四源发现（v8.2-CE）：进程反查 / 切换工具配置 / 快捷方式 / 有界遍历
+    #      3) 全是「猜固定目录名」，用户把 ZCode 装到 H:\ZCode 这种自定义一级目录就漏了。
+    def _zcode_root_ok(d):
+        return bool(d) and (os.path.isfile(os.path.join(d, ZCODE_SYS_PROMPT_REL))
+                            or os.path.isfile(os.path.join(d, "ZCode.exe")))
+
+    app, src = discover_app_root(("ZCode.exe",), _zcode_root_ok)
+    if app:
+        cand = os.path.join(app, ZCODE_SYS_PROMPT_REL)
+        if os.path.isfile(cand):
+            _ZCODE_SRC.update({"src": src, "app": app})
+            return cand
 
     # 4) 盘符浅扫（只往下 3 层，别把整机翻一遍）
     for letter in string.ascii_uppercase:
@@ -5470,10 +5629,11 @@ class ZCodeTarget:
             rows.append(("info", "技能清单：%d 个" % n_sk, "、".join(ZCODE_SKILL_DIRS)))
         if cjs:
             t = read_text_safe(cjs) or ""
+            _src = ("  ← %s" % _ZCODE_SRC["src"]) if _ZCODE_SRC.get("src") else ""
             if ZCODE_MARK in t:
-                rows.append(("ok", "系统提示词：已被本工具替换（%s）" % cjs, ""))
+                rows.append(("ok", "系统提示词：已被本工具替换（%s）%s" % (cjs, _src), ""))
             else:
-                rows.append(("info", "系统提示词：未 patch（默认通道，需 --zpatch）", cjs))
+                rows.append(("info", "系统提示词：未 patch（默认通道，需 --zpatch）", cjs + _src))
         else:
             rows.append(("info", "没找到 zcode.cjs（可能不是桌面版，或装在非常规位置）", ""))
         st, note = passport_status(home, self.key)
@@ -5516,6 +5676,8 @@ class _MarkBlockTarget:
     mark_begin = "<!-- POJIA-NEXT-INJECT:BEGIN -->"
     mark_end = "<!-- POJIA-NEXT-INJECT:END -->"
     proc_names = ()
+    # 桌面端 exe 名（有就填，用于「没检测到」时反查安装目录）。纯 CLI 目标留空。
+    app_exe = ()
     # 还原后文件被清空时，是否可以把文件本身删掉。
     # 纯 Markdown 指令文件（AGENTS.md / CLAUDE.md）可以；config.toml 这种
     # 结构化配置不可以（删了客户端起不来）。
@@ -5721,7 +5883,19 @@ class _MarkBlockTarget:
         rows = []
         home = self.resolve_home(getattr(args, self.arg_name, "") or "")
         if not os.path.isdir(home):
-            return [("warn", "没检测到 %s（配置目录 %s 不存在）" % (self.label, home), "")]
+            note = ""
+            exes = getattr(self, "app_exe", ())
+            if exes:
+                # 「没检测到」有两种：真没装，和装了但还没生成配置目录。
+                # 只走三个廉价通道（不实扫），有命中就把话说清楚，省得用户以为装坏了。
+                root, src = discover_app_root(
+                    exes, lambda d: bool(d) and any(
+                        os.path.isfile(os.path.join(d, e)) for e in exes),
+                    walk=False)
+                if root:
+                    note = ("但安装目录在 %s（← %s）：启动一次 %s 让它生成配置目录，再重跑即可"
+                            % (root, src, self.label))
+            return [("warn", "没检测到 %s（配置目录 %s 不存在）" % (self.label, home), note)]
         rows.append(("info", "配置目录 : %s" % home, ""))
         target = self.prompt_path(home)
         txt = read_text_safe(target)
@@ -6034,6 +6208,7 @@ class CursorTarget(_MarkBlockTarget):
     env_vars = ("CURSOR_HOME",)
     # ⚠ Windows tasklist 的进程名带 .exe：不带 .exe 形态永远匹配不到（实测）
     proc_names = ("Cursor.exe", "cursor.exe", "Cursor")
+    app_exe = ("Cursor.exe",)
     mark_begin = CURSOR_MARK
     mark_end = "<!-- POJIA-NEXT-INJECT:END -->"
 
@@ -6137,6 +6312,7 @@ class ClaudeTarget(_MarkBlockTarget):
     env_vars = ("CLAUDE_CONFIG_DIR",)
     # ⚠ Windows tasklist 的进程名带 .exe：不带 .exe 形态永远匹配不到（实测）
     proc_names = ("claude.exe", "Claude.exe", "claude", "Claude")
+    app_exe = ("Claude.exe",)
     mark_begin = "<!-- POJIA-NEXT-INJECT:BEGIN -->"
     mark_end = "<!-- POJIA-NEXT-INJECT:END -->"
 
@@ -6266,6 +6442,7 @@ class TraeTarget(_MarkBlockTarget):
     arg_name = "trae_dir"
     env_vars = ("TRAE_HOME",)
     proc_names = ("Trae.exe", "Trae")
+    app_exe = ("Trae.exe",)
 
     def pick_title(self):
         return "选择 Trae 的配置目录（一般是 用户目录\\.trae）"
@@ -6300,6 +6477,7 @@ class CodeBuddyTarget(_MarkBlockTarget):
     #   CodeBuddy CLI 的全局指令固定在 用户目录\.codebuddy\CODEBUDDY.md。
     env_vars = ()
     proc_names = ("codebuddy.exe", "CodeBuddy.exe", "codebuddy")
+    app_exe = ("CodeBuddy.exe", "codebuddy.exe")
 
     def pick_title(self):
         return "选择 CodeBuddy 的配置目录（一般是 用户目录\\.codebuddy）"
@@ -6360,6 +6538,7 @@ class WindsurfTarget(_MarkBlockTarget):
     #    人格块超限时在写后自检里提示（不回滚 —— 破甲主体仍然生效）。
     GLOBAL_RULES_CAP = 6000
     proc_names = ("Windsurf.exe", "windsurf.exe", "Windsurf")
+    app_exe = ("Windsurf.exe",)
 
     def pick_title(self):
         return "选择 Windsurf 的配置目录（一般是 用户目录\\.codeium\\windsurf）"
