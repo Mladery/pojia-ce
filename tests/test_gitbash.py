@@ -205,6 +205,38 @@ def test_preset_reinstall_flips_switches(core, home, tmp_path):
         core.GITBASH_ON = False
 
 
+def test_standard_override_keeps_identity(core):
+    """没装破甲模式时要覆盖官方 standard —— 整条抄，身份字段一个都不能丢。
+
+    cordis 的覆盖是 target[key]=value，给 config 就是整个替换。只写 plugins 会把
+    id/name/description/order 抹掉，模式下拉里那一项就废了。
+    """
+    t = core.standard_preset_override(STD_YML)
+    assert t.startswith("# >>> " + core.GITBASH_STD_MARK)
+    assert "- id: preset-standard" in t
+    assert "id: standard" in t and "order: 1" in t
+    assert "name: '@deepseek-ai/dsh-agent-preset'" in t
+    assert "!!js" not in t
+    assert "disabled: false" in _entry(t, "tool-bash")
+    assert "disabled: true" in _entry(t, "tool-pwsh")
+
+
+def test_install_writes_standard_override_without_preset(core, home, tmp_path):
+    """没有破甲模式时，install 要自己补一条 standard 覆盖，否则工具开关改不到。"""
+    base = tmp_path / "install" / "node_modules" / "@deepseek-ai"
+    std = base / "dsh-web-app" / "presets"
+    std.mkdir(parents=True)
+    (std / "standard.patch.yml").write_text(STD_YML, encoding="utf-8")
+
+    before = _read(home)
+    ok, note = core.gitbash_install(str(home), EXE, bases=[str(base)])
+    assert ok, note
+    txt = _read(home)
+    assert core.GITBASH_STD_MARK in txt
+    assert core.gitbash_remove(str(home))[0] is True
+    assert _read(home) == before
+
+
 def test_wsl_bash_is_rejected(core):
     """System32 那个 bash.exe 是 WSL 入口，绝不能当成 Git Bash。"""
     assert core._is_wsl_bash(r"C:\Windows\System32\bash.exe")

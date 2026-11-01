@@ -446,7 +446,10 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 
 > 参考 WorkBuddy 的解法（不照搬）：它自带 PortableGit，并用 `CODEBUDDY_CODE_GIT_BASH_PATH` 这个专用变量告诉上层 bash 在哪，绕开 PATH 顺序。DSH 没有这个变量，所以这里用「插件改 PATH」达到同样效果，并且优先复用 WB 那份 Git —— 用户机器上已经有一份能跑的 bash，没必要再下一份。
 
-**怎么用。** `--apply --target dsh --git-bash`，或者菜单里走到 DSH 时回答 `接管 Git Bash？(y/N)`；`--no-git-bash` 表示不改也不再问。装了破甲模式的话，预设里 `tool-bash` / `tool-pwsh` 的 `disabled` 也会一并翻过来 —— preset 的插件清单是**独立子树**（`dsh-agent-preset-registry` 的 `mountPreset`），不继承 base 顶层那份，两处都得改，只改一处就是「工具在、执行器不在」或反过来。
+**怎么用。** `--apply --target dsh --git-bash`，或者菜单里走到 DSH 时回答 `接管 Git Bash？(y/N)`；`--no-git-bash` 表示不改也不再问。预设层是**独立子树**（`dsh-agent-preset-registry` 的 `mountPreset`），不继承 base 顶层那份，所以两处都得改 —— 只改一处就是「工具在、执行器不在」或者反过来。工具会按你实际用的预设处理：
+
+- 装了「破甲模式」→ 重写那条预设，把 `tool-bash` / `tool-pwsh` 的 `disabled` 翻过来；
+- 没装（用官方 standard）→ 整条抄一份 standard 做成覆盖（只写 `plugins` 会把 `id` / `name` / `order` 抹掉，下拉里那一项就废了），只翻转两行。
 
 **边界。**
 
@@ -488,7 +491,7 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 ## 六、校验
 
 ```
-0839971a46ec0ac0482ffa1c07107c97d4034e2a778cad569cf63562f330ce68  src/破甲一键通.py           (471,254 B / LF)
+ff50f929d401b7dfb87cfc56d9348c58e26dd04e31e2d8e7300b2e411bf9b1b8  src/破甲一键通.py           (474,722 B / LF)
 e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```

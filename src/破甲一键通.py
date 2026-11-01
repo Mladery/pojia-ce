@@ -2330,6 +2330,8 @@ def preset_remove(dsh_home, dry=False):
 #   那份 Git —— 用户机器上已经有一份能跑的 bash，没必要再下一份。
 GITBASH_ID = "pojia-gitbash"
 GITBASH_MARK = "pojia-gitbash"
+# 标准预设的覆盖用另一个标记：它和"破甲模式"是互斥的两条路线，摘的时候要分开认。
+GITBASH_STD_MARK = "pojia-gitbash-std"
 # WSL 的 bash.exe 必须排除：它把 /c/... 当 Linux 路径，跑什么都是错的。
 _WSL_BASH_TAILS = ("\\windows\\system32\\bash.exe", "\\windowsapps\\bash.exe")
 
@@ -2590,6 +2592,41 @@ def ensure_git_bash(dsh_home, say_fn=None):
     return install_git_bash(dsh_home, say_fn=say_fn)
 
 
+def standard_preset_override(std_txt):
+    """把官方 standard 预设整条抄下来、翻转工具开关，做成一条**覆盖**。
+
+    为什么要整条抄：cordis 的覆盖是 `target[key] = value`，给 `config` 就直接替换
+    整个 config —— 只写 plugins 会把 id/name/description/order 一起弄丢，模式下拉里
+    那一项就废了。所以整条搬、整条换，只把 plugins 里两行 disabled 翻过来。
+
+    什么时候需要它：用户没装「破甲模式」时，预设层还是官方的 standard，
+    base 顶层那四条改了也没用 —— preset 的插件清单是独立子树，不继承 base。
+    """
+    lines = (std_txt or "").replace("\r\n", "\n").split("\n")
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == "- id: preset-standard"), -1)
+    if start < 0:
+        return ""
+    ind = len(lines[start]) - len(lines[start].lstrip(" "))
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        ln = lines[j]
+        if ln.strip() and (len(ln) - len(ln.lstrip(" "))) <= ind and ln.lstrip().startswith("- "):
+            end = j
+            break
+    block = [ln[ind:] if ln.startswith(" " * ind) else ln for ln in lines[start:end]]
+    p = next((k for k, ln in enumerate(block) if ln.strip() == "plugins:"), -1)
+    if p < 0:
+        return ""
+    plugins = preset_plugins_block(std_txt, None, flip_bash=True)
+    if not plugins:
+        return ""
+    plugins = "\n".join(ln[4:] if ln.startswith("    ") else ln for ln in plugins.split("\n"))
+    body = "\n".join(block[:p + 1] + plugins.split("\n")).rstrip()
+    return ("# >>> " + GITBASH_STD_MARK + "  标准预设覆盖（Git Bash）\n"
+            "# 由破甲一键通写入：官方 standard 预设里把 bash 工具打开、pwsh 关掉。\n"
+            + body + "\n# <<< " + GITBASH_STD_MARK + "\n")
+
+
 def gitbash_patch_text(exe):
     """profile patch 里那一段：翻四个平台开关 + 装 PATH 插件。
 
@@ -2681,12 +2718,34 @@ def gitbash_rows(dsh_home):
     return rows
 
 
-def gitbash_install(dsh_home, exe, dry=False):
-    """把接管段写进每个 profile，并装 PATH 插件。幂等。"""
+def gitbash_install(dsh_home, exe, dry=False, bases=None, roots=None):
+    """把接管段写进每个 profile，并装 PATH 插件。幂等。
+
+    预设层分两种情况：
+      · 装了「破甲模式」→ 它的 plugins 由 preset_install 翻转（那边认 GITBASH_ON）；
+      · 没装（用的官方 standard）→ 这里补一条 standard 的整条覆盖，否则 base 顶层
+        开了、预设子树里还是关的，模型照样看不到 bash 工具。
+    """
     profs = dsh_profiles(dsh_home)
     if not profs:
         return False, "未找到 profiles/*/cordis.patch.yml（非桌面版布局），跳过 Git Bash 接管"
     row = gitbash_patch_text(exe)
+    std_row = ""
+    _has_preset = False
+    for prof in profs:
+        try:
+            _t, _b = read_text(os.path.join(prof, "cordis.patch.yml"))
+            if ("id: " + PRESET_ROW) in (_t or ""):
+                _has_preset = True
+                break
+        except Exception:
+            pass
+    if not _has_preset:
+        try:
+            _std, _src = preset_std_text(bases or [], roots or [])
+            std_row = standard_preset_override(_std) if _std else ""
+        except Exception:
+            std_row = ""
     done = []
     for prof in profs:
         yml = os.path.join(prof, "cordis.patch.yml")
@@ -2700,9 +2759,10 @@ def gitbash_install(dsh_home, exe, dry=False):
                 continue
             _guard_keep(yml, GITBASH_MARK)
             base = _drop_marked(txt, GITBASH_MARK)
+            base = _drop_marked(base, GITBASH_STD_MARK)
             if base and not base.endswith("\n"):
                 base += "\n"
-            write_text(yml, base + row, bom=bom)
+            write_text(yml, base + row + std_row, bom=bom)
             os.makedirs(pkg, exist_ok=True)
             write_text(os.path.join(pkg, "package.json"), GITBASH_PKG)
             write_text(os.path.join(pkg, "index.js"), GITBASH_JS)
@@ -2711,6 +2771,8 @@ def gitbash_install(dsh_home, exe, dry=False):
             return False, "%s 写入失败：%s" % (tag, e)
     head = "Git Bash 接管将写入" if dry else "Git Bash 接管已写入"
     tail = "" if dry else "，重启 DSH 后 bash 工具即可用（%s）" % exe
+    if not _has_preset and not std_row and not dry:
+        tail += "；没读到 standard 预设，工具开关没改 —— 装一次 --dsh-mode preset 更稳"
     return True, "%s（%s）%s" % (head, "、".join(done), tail)
 
 
@@ -2726,14 +2788,16 @@ def gitbash_remove(dsh_home, dry=False):
         try:
             txt, bom = read_text(yml)
             txt = txt or ""
-            if GITBASH_MARK not in txt and not os.path.isdir(pkg):
+            if (GITBASH_MARK not in txt and GITBASH_STD_MARK not in txt
+                    and not os.path.isdir(pkg)):
                 continue
             if dry:
                 done.append(tag + " 将移除")
                 continue
-            if GITBASH_MARK in txt:
+            if GITBASH_MARK in txt or GITBASH_STD_MARK in txt:
                 _guard_keep(yml, GITBASH_MARK + "-rm")
-                write_text(yml, _drop_marked(txt, GITBASH_MARK), bom=bom)
+                txt = _drop_marked(txt, GITBASH_MARK)
+                write_text(yml, _drop_marked(txt, GITBASH_STD_MARK), bom=bom)
             if os.path.isdir(pkg):
                 shutil.rmtree(pkg, ignore_errors=True)
             done.append(tag + " 已移除")
@@ -4271,7 +4335,9 @@ class DshTarget:
                     _gexe, _gnote = ensure_git_bash(h)
                     log(_gnote, "g" if _gexe else "y", "dsh")
                     if _gexe:
-                        _bok, _bnote = gitbash_install(h, _gexe, dry=False)
+                        _bok, _bnote = gitbash_install(
+                            h, _gexe, dry=False, bases=bases,
+                            roots=self.desktop_roots(bases))
                         log(_bnote, "g" if _bok else "y", "dsh")
                 except Exception as _be:
                     log("Git Bash 接管异常（补丁不受影响）：%s" % _be, "y", "dsh")
@@ -4294,7 +4360,9 @@ class DshTarget:
                     _gexe, _ver, _sys = find_git_bash(self.dsh_home())
                     if _gexe:
                         log("[预演] Git Bash 接管：将使用 %s（%s）" % (_gexe, _ver), "y", "dsh")
-                        _bok, _bnote = gitbash_install(self.dsh_home(), _gexe, dry=True)
+                        _bok, _bnote = gitbash_install(
+                            self.dsh_home(), _gexe, dry=True, bases=bases,
+                            roots=self.desktop_roots(bases))
                         log("[预演] " + _bnote, "y" if _bok else "dg", "dsh")
                     else:
                         log("[预演] Git Bash 接管：本机没找到，正式执行时会从镜像下一个 PortableGit",
