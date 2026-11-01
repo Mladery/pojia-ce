@@ -210,6 +210,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 这个 job 没有 checkout，工作区里没有 .git，gh 推不出仓库是谁 ——
+          # 会直接 `fatal: not a git repository`。GH_REPO 把仓库写死给它。
+          GH_REPO: ${{ github.repository }}
         run: |
           TAG="${{ github.ref_name }}"
           gh release view "$TAG" >/dev/null 2>&1 \
