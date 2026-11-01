@@ -374,7 +374,27 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 
 插件本身零依赖、纯 ESM，只做上面那张表里的事；没有网络请求，不读用户内容，不写任何文件。
 
-### 16. 与上游的差异
+### 16. 还原的彻底性（痕迹清理 + 原档保险库）
+
+「补丁还原了」不等于「回到原样」。DSH 上最容易漏掉的是这几样，现在 `--revert` 一并处理：
+
+| 痕迹 | 为什么会漏 | 现在怎么处理 |
+|---|---|---|
+| `resources/app/`（解包出来的副本） | 解包目录在，DSH 就一直加载它；厂商升级 `app.asar` 也盖不过 | 解包时写 `.pojia-unpacked` 标记，`--revert` 见到标记就删 |
+| 早期版本解出来的 `resources/app/` | 那时还没有标记，删了怕误伤用户自己解的 | `--revert --deep` 强制删；不加 `--deep` 时在 `--check` 里标成「待确认」 |
+| `*.pojia-*.bak`（守卫/预设的备份） | 只删了补丁备份，这两类没人管 | 一并删（只删带 `.pojia-` 的，别人的 `.bak-2026...` 不碰） |
+| `managed-prompts/pojia-yijiantong/` | 护照删了、目录还在 | 整目录删 |
+| `dsh-purge/`、`app.pojia-old`、`app.asar-extract-tmp-*` | 中间产物 | 一并清 |
+| Electron 熔丝 | 翻成「关」之后没人翻回来 | 有 `.pojia-fusebak` 就按原文件还原 |
+| 还原之后又被自动解包回来 | 发现阶段找不到 `resources/app/` 就重新解包 —— `--status` / `--check` 都会触发 | 还原时在 `<DSH_HOME>/pojia-reverted.json` 留「还原戳」，只有 `--apply` 才重新解包 |
+
+`--check` 会直接报：`!! 残留痕迹 N 项（--revert 会一并清掉）`，并列出分类计数，不用自己去找；已经还原过的安装根显示为 `-- 已还原：1 个安装根的解包目录已删除（--apply 会重新解包）`。
+
+**原档保险库**：旁路备份（`<file>.dshpurge.bak`）有两个天然弱点 —— 清理软件会把陌生后缀当垃圾删掉；密封目录里又不能放兄弟文件，只能存到 `dsh-purge/shim-backups/` 而那个路径带 sha1，文件一挪位就对不上号。备份没了，`--revert` 只能报 `nobak` 把注入版留在原地，这就是「还原不彻底」最常见的成因。
+
+所以打补丁时会在 `managed-prompts/pojia-yijiantong/pristine/` 再存一份原档（附 `index.json` 记原路径）。`--revert` 先找旁路备份，找不到就吃保险库，日志会写「用专属保险库里的原档」。`--check` 里显示为 `原档保险库：N 份`。
+
+### 17. 与上游的差异
 
 截至 2026-11-01，与上游最新公开文档逐条比对：
 
@@ -405,7 +425,7 @@ profiles/desktop/package.json          dependencies 登记 file: 依赖
 ## 六、校验
 
 ```
-7bde1596ad63f1eab80b9d480da66360bacf63dac4f71695777921ee707464df  src/破甲一键通.py           (426,294 B / LF)
+c04c2c200bb000b03154e2de259d6d510ca0362943012157f380fc6da15bf8a1  src/破甲一键通.py           (442,280 B / LF)
 e683e23d60d5098acddc2aa0b1765881f0d3e40527deacc0fb6e34412aa3b314  src/破甲GUI.py              (23,680 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```

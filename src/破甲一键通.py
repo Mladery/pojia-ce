@@ -879,6 +879,77 @@ def manifest_save(name, paths):
         pass
 
 
+# ---- 原档保险库：旁路 .bak 被清理工具 / 宿主升级冲掉时的最后一道防线 --------
+# 旁路备份（`<file>.dshpurge.bak`）有两个天然弱点：
+#   1. 清理软件会把"陌生后缀"当垃圾删掉；
+#   2. 密封目录里不能放兄弟文件，只能存到 DSH_HOME/dsh-purge/shim-backups/，
+#      而那个路径里带 sha1 —— 文件一挪位置就对不上号。
+# 备份没了，revert 就只能报 nobak、把注入版留在原地（"还原不彻底"就是这么来的）。
+# 所以在专属目录里再存一份原档，revert 先找旁路、找不到就吃这口保险。
+def vault_dir(root):
+    d = avatar_dir_for(root)
+    return os.path.join(d, "pristine") if d else ""
+
+
+def _vault_key(path):
+    return hashlib.sha1(os.path.normcase(os.path.abspath(path)).encode("utf-8"),
+                        usedforsecurity=False).hexdigest()[:20]
+
+
+def vault_put(root, path, data=None):
+    """把原档存进保险库。data 传 None 表示直接读 path。返回落盘路径（失败返回 ""）。"""
+    d = vault_dir(root)
+    if not d or not path:
+        return ""
+    try:
+        if data is None:
+            with open(path, "rb") as f:
+                data = f.read()
+        os.makedirs(d, exist_ok=True)
+        out = os.path.join(d, _vault_key(path) + ".bin")
+        _atomic_write(out, data)
+        idx = os.path.join(d, "index.json")
+        obj = {}
+        if os.path.isfile(idx):
+            try:
+                obj = json.loads(read_text_safe(idx) or "{}")
+            except Exception:
+                obj = {}
+        if not isinstance(obj, dict):
+            obj = {}
+        obj[_vault_key(path)] = {"path": os.path.abspath(path), "size": len(data),
+                                 "time": _dt_now_iso()}
+        _atomic_write(idx, json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8"))
+        return out
+    except Exception:
+        return ""
+
+
+def vault_get(root, path):
+    """从保险库取回原档字节；没有返回 None。"""
+    d = vault_dir(root)
+    if not d:
+        return None
+    p = os.path.join(d, _vault_key(path) + ".bin")
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def vault_count(root):
+    d = vault_dir(root)
+    if not d or not os.path.isdir(d):
+        return 0
+    try:
+        return len([n for n in os.listdir(d) if n.endswith(".bin")])
+    except OSError:
+        return 0
+
+
 # ---- 进程 ----------------------------------------------------------------
 
 def _decode_console(raw):
@@ -2167,10 +2238,184 @@ def preset_remove(dsh_home, dry=False):
     return True, "破甲模式已移除（%s）" % "、".join(done)
 
 
+def revert_traces(dsh_home, bases, dry=False, deep=False):
+    """清掉本工具留在盘上的痕迹。返回 [(动作, 路径)]；dry=True 只列不做。
+
+    都是"补丁还原了、盘上却还留着我们动过的东西"这一类，也是"还原不彻底"的真身：
+      1. resources/app/ —— 我们解包的（有 .pojia-unpacked 标记才敢删）
+      2. 解包中途的 app.pojia-old / app.asar-extract-tmp-* 残留
+      3. 熔丝：翻过就翻回来（.pojia-fusebak 是原文件副本）
+      4. 我们自己的备份（*.pojia-*.bak）
+      5. 专属目录 managed-prompts/pojia-yijiantong（护照、保险库、历史快照都在这）
+      6. dsh-purge（密封目录的备份区）
+
+    deep=True 时，**没有标记**的 resources/app/ 也删 —— 早期版本解包时不留标记，
+    那份目录删不掉就等于没还原（DSH 会一直加载它，厂商升级也盖不过）。
+    """
+    acts = []
+    T = DshTarget
+    _seen_root = set()
+    for b in bases or []:
+        root = T._install_root_of(b)
+        if not root:
+            continue
+        _rk = os.path.normcase(os.path.abspath(root))
+        if _rk in _seen_root:
+            continue                    # 两套 base 常指到同一个安装根，别重复列/重复删
+        _seen_root.add(_rk)
+        res = os.path.join(root, "resources")
+        app = os.path.join(res, "app")
+        asar = os.path.join(res, "app.asar")
+        if os.path.isdir(app):
+            if os.path.isfile(os.path.join(app, T._ASAR_MARK)):
+                acts.append(("解包目录", app))
+                if not dry:
+                    if T._asar_drop(app):
+                        revert_stamp_mark(root, asar)
+                    else:
+                        log("  解包目录删不掉（多半被占用）：%s —— 重启 DSH 后再跑一次" % app, "y", "dsh")
+            elif deep:
+                acts.append(("解包目录（无标记，按 --deep 删除）", app))
+                if not dry:
+                    if T._asar_drop(app):
+                        revert_stamp_mark(root, asar)
+                    else:
+                        log("  解包目录删不掉（多半被占用）：%s —— 重启 DSH 后再跑一次" % app, "y", "dsh")
+            elif os.path.isfile(asar):
+                # 没标记不敢删：可能是用户自己解的。但也不能装作没看见。
+                acts.append(("待确认：resources/app 无标记（删它才算彻底还原，加 --deep）", app))
+        if os.path.isdir(res):
+            try:
+                names = os.listdir(res)
+            except OSError:
+                names = []
+            for n in names:
+                if n.startswith("app.pojia-old") or n.startswith(T._ASAR_TMP):
+                    p = os.path.join(res, n)
+                    acts.append(("解包残留", p))
+                    if not dry:
+                        T._asar_drop(p)
+        for fp in T._fuse_candidates(root):
+            bak = fp + ".pojia-fusebak"
+            if os.path.isfile(bak):
+                acts.append(("熔丝还原", fp))
+                if not dry:
+                    try:
+                        shutil.copyfile(_wp(bak), _wp(fp))
+                        os.remove(_wp(bak))
+                    except Exception:
+                        pass
+    for prof in dsh_profiles(dsh_home):
+        try:
+            names = os.listdir(prof)
+        except OSError:
+            names = []
+        for n in names:
+            if ".pojia-" in n and n.endswith(".bak"):
+                p = os.path.join(prof, n)
+                acts.append(("自建备份", p))
+                if not dry:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+    md = avatar_dir_for(dsh_home)
+    if md and os.path.isdir(md):
+        acts.append(("专属目录", md))
+        if not dry:
+            shutil.rmtree(md, ignore_errors=True)
+    sp = os.path.join(dsh_home or "", "dsh-purge")
+    if os.path.isdir(sp):
+        acts.append(("密封备份区", sp))
+        if not dry:
+            shutil.rmtree(sp, ignore_errors=True)
+    return acts
+
+
+def dsh_home_path():
+    return os.path.normpath(os.environ.get("DSH_HOME")
+                            or os.path.join(os.path.expanduser("~"), ".dsh"))
+
+
+# ---- 还原戳：别让下一次体检把刚删掉的解包目录又解回来 ------------------------
+def _revert_stamp_path(home=None):
+    # 放在 DSH_HOME 根上，**不能**放 dsh-purge/ —— 还原最后一步会把 dsh-purge 整个删掉，
+    # 戳跟着一起没了，下一次体检又把 app/ 解回来。
+    return os.path.join(home or dsh_home_path(), "pojia-reverted.json")
+
+
+def revert_stamp_load(home=None):
+    p = _revert_stamp_path(home)
+    if not os.path.isfile(p):
+        return {}
+    try:
+        obj = json.loads(read_text_safe(p) or "{}")
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def revert_stamp_mark(root, asar_path, home=None):
+    """记下"这个安装根的 resources/app 是还原时删掉的"。
+
+    发现阶段一旦找不到 resources/app/ 就会重新解包 —— revert 刚删掉、下一次
+    --status 又长回来，用户看到的就是"还原不彻底"。有了这条记录，只有 --apply
+    才会重新解包（那是明确的用户意图）。
+    """
+    try:
+        if not asar_path or not os.path.isfile(asar_path):
+            return False
+        st = os.stat(asar_path)
+        obj = revert_stamp_load(home)
+        obj[os.path.normcase(os.path.abspath(root))] = {
+            "root": os.path.abspath(root),      # 原样大小写，显示时用这个
+            "asar_size": st.st_size, "asar_mtime": int(st.st_mtime),
+            "time": _dt_now_iso()}
+        p = _revert_stamp_path(home)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        _atomic_write(p, json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8"))
+        return True
+    except Exception:
+        return False
+
+
+def revert_stamp_hit(root, asar_path, home=None):
+    """当前 asar 是否正是还原时记下的那个（asar 换过就不算，说明宿主升级了）。"""
+    if not asar_path or not os.path.isfile(asar_path):
+        return False
+    rec = revert_stamp_load(home).get(os.path.normcase(os.path.abspath(root)))
+    if not isinstance(rec, dict):
+        return False
+    try:
+        st = os.stat(asar_path)
+        return rec.get("asar_size") == st.st_size and rec.get("asar_mtime") == int(st.st_mtime)
+    except Exception:
+        return False
+
+
+def revert_stamp_clear(root, home=None):
+    obj = revert_stamp_load(home)
+    k = os.path.normcase(os.path.abspath(root))
+    if k not in obj:
+        return
+    obj.pop(k, None)
+    try:
+        p = _revert_stamp_path(home)
+        if obj:
+            _atomic_write(p, json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8"))
+        elif os.path.isfile(p):
+            os.remove(p)
+    except Exception:
+        pass
+
+
 class DshTarget:
     key = "dsh"
     label = "DSH (DeepSeek Harness)"
     bak_suffix = BAK_DSH
+    # 只有 --apply 会把它置 True。发现阶段的自动解包会让还原失效：
+    # 删掉的 resources/app/ 会被下一次 --status 原样解回来。
+    _unpack_ok = False
 
     # v8.2-CE：四源发现的来源标注（--status 显示，定位错了能立刻看出是哪一层判断的）
     found_by = ""
@@ -2239,6 +2484,10 @@ class DshTarget:
     # 目录优先于 resources/app.asar），解包后的文件就是普通磁盘文件，走常规补丁。
     # 回滚 = 删 resources/app/ 目录（app.asar 本体全程不动）。
     _ASAR_TMP = "app.asar-extract-tmp"
+    # 解包完在 resources/app/ 里放一枚标记。没有它，谁也说不清这个 app/ 是我们解出来的
+    # 还是用户自己解的 —— 那 revert 就不敢删，于是"还原"之后 DSH 仍然加载这份解包副本，
+    # 厂商升级 app.asar 也永远盖不过它。标记是让 revert 敢动手的唯一凭据。
+    _ASAR_MARK = ".pojia-unpacked"
     # 桌面端把插件放在 asar 根的 dsh/node_modules/@deepseek-ai 下（本机 DSH 实测如此），
     # 也有构建直接放根 node_modules/@deepseek-ai。两个位置都要认 —— 原来只写死前者，
     # 一旦实际布局不符，复用判定永远不成立，于是每次 --check 都要把 180 MB 的
@@ -2359,6 +2608,10 @@ class DshTarget:
         if not os.path.isfile(asar):
             return ""
         app_dir = os.path.join(res_root, "app")
+        _root = os.path.dirname(os.path.normpath(res_root))
+        if not cls._unpack_ok and revert_stamp_hit(_root, asar):
+            return ""                    # 还原过，别再自动解包
+
         # 已解包且没过期（asar 没更新过）→ 复用
         if os.path.isdir(app_dir) and os.path.getmtime(asar) <= os.path.getmtime(app_dir):
             hit = cls._find_ai_under(app_dir)
@@ -2387,6 +2640,7 @@ class DshTarget:
             if not cls._find_ai_under(tmp):
                 raise RuntimeError("插件目录没写出来（%d 项已写 / %d 项缺失）"
                                    % (stats["ok"], stats["lost"]))
+            revert_stamp_clear(_root)     # 重新解包了，还原戳作废
             old = app_dir + ".pojia-old"
             if os.path.isdir(app_dir):
                 os.replace(app_dir, old)               # 旧版挪走
@@ -2402,10 +2656,32 @@ class DshTarget:
                 % (stats["lost"], "、".join(stats["lost_list"][:3])), "y", "dsh")
         log("  app.asar 已解包到 resources/app/（%d 个文件，删掉该目录即回滚）"
             % stats["ok"], "g", "dsh")
+        # 留标记：记下"这个 app/ 是本工具解的"以及解的是哪个 asar。revert 据此才敢删。
+        try:
+            write_text(os.path.join(app_dir, cls._ASAR_MARK),
+                       json.dumps({"tool": "pojia-yijiantong", "version": VERSION,
+                                   "asar": os.path.basename(asar),
+                                   "asar_size": os.path.getsize(asar),
+                                   "files": stats["ok"],
+                                   "time": _dt_now_iso()},
+                                  ensure_ascii=False, indent=2) + "\n")
+        except Exception:
+            pass
         # 解包完成后再看保险丝：Electron 若烧死了 OnlyLoadAppFromAsar，它压根不认
         # resources/app/，我们这一整套解包等于白做（表面"已写入·重启生效"，实际永不生效）。
         cls._flip_only_asar_fuse(os.path.dirname(res_root))
         return cls._find_ai_under(app_dir)
+
+    def _maybe_unpack(self, res_root):
+        """按需解包 —— 只有真正 apply 时才动手。
+
+        解包要往安装目录写一百多 MB，而 --status / --check / --dry-run 都自述
+        "不改盘"。旧行为是发现阶段顺手就解，于是：revert 刚删掉的 resources/app/，
+        跑一次 --status 又原样长回来 —— 用户看到的"还原不彻底"正是这个。
+        """
+        if not getattr(self, "allow_unpack", False):
+            return ""
+        return self.asar_extract_agent_dir(res_root)
 
     # ---- Electron 保险丝（fuse）----
     # 官方 fuse wire 格式：32 字节 sentinel + version(1) + length(1) + 每个熔丝 1 字节，
@@ -2575,7 +2851,7 @@ class DshTarget:
                         "node_modules/@deepseek-ai"):
                 add(os.path.join(r, *sub.split("/")))
             # v8.2：asar 内打包的插件（桌面端真正运行的那份）→ 解包后纳入靶点
-            ai = self.asar_extract_agent_dir(os.path.join(r, "resources"))
+            ai = self._maybe_unpack(os.path.join(r, "resources"))
             if ai:
                 add(ai)
             if os.path.basename(os.path.normpath(r)) in ("Programs", "Applications"):
@@ -2588,7 +2864,7 @@ class DshTarget:
                                         "Contents/Resources/app/node_modules/@deepseek-ai",
                                         "node_modules/@deepseek-ai"):
                                 add(os.path.join(prod, *sub.split("/")))
-                            ai = self.asar_extract_agent_dir(os.path.join(prod, "resources"))
+                            ai = self._maybe_unpack(os.path.join(prod, "resources"))
                             if ai:
                                 add(ai)
                 except OSError:
@@ -2609,7 +2885,7 @@ class DshTarget:
                 if os.path.isdir(d):
                     add(os.path.join(d, "resources", "app", "node_modules", "@deepseek-ai"))
                     add(os.path.join(d, "resources", "app", "dsh", "node_modules", "@deepseek-ai"))
-                    ai = self.asar_extract_agent_dir(os.path.join(d, "resources"))
+                    ai = self._maybe_unpack(os.path.join(d, "resources"))
                     if ai:
                         add(ai)
 
@@ -2671,7 +2947,7 @@ class DshTarget:
                     "resources/app.asar.unpacked/node_modules/@deepseek-ai",
                     "node_modules/@deepseek-ai"):
             add(os.path.join(app, *sub.split("/")))
-        ai = self.asar_extract_agent_dir(os.path.join(app, "resources"))
+        ai = self._maybe_unpack(os.path.join(app, "resources"))
         if ai:
             add(ai)
 
@@ -2722,7 +2998,7 @@ class DshTarget:
                 add(os.path.normpath(m.group(0)))
 
     def dsh_home(self):
-        return os.path.normpath(os.environ.get("DSH_HOME") or os.path.join(os.path.expanduser("~"), ".dsh"))
+        return dsh_home_path()
 
     # ---------------- 备份 / 密封目录 ----------------
     def is_sealed_bin(self, dirpath):
@@ -3073,6 +3349,25 @@ class DshTarget:
                 rows.append(("ok", "Electron 保险丝正常（OnlyLoadAppFromAsar 已关）", ""))
         rows.extend(guard_rows(self.dsh_home()))
         rows.extend(preset_rows(self.dsh_home()))
+        _stamps = revert_stamp_load(self.dsh_home())
+        _live = [(_rec or {}).get("root") or _k for _k, _rec in _stamps.items()
+                 if not os.path.isdir(os.path.join(_k, "resources", "app"))]
+        if _live:
+            rows.append(("info", "已还原：%d 个安装根的解包目录已删除（--apply 会重新解包）"
+                         % len(_live), "、".join(_live[:2])))
+        _nv = vault_count(self.dsh_home())
+        if _nv:
+            rows.append(("info", "原档保险库：%d 份（旁路备份被删也能还原）" % _nv, ""))
+        try:
+            _acts = revert_traces(self.dsh_home(), bases, dry=True)
+        except Exception:
+            _acts = []
+        if _acts:
+            _kinds = {}
+            for _k, _p in _acts:
+                _kinds[_k] = _kinds.get(_k, 0) + 1
+            rows.append(("warn", "残留痕迹 %d 项（--revert 会一并清掉）" % len(_acts),
+                         "、".join("%s %d" % (k, v) for k, v in _kinds.items())))
         rows.extend(host_overwrite_rows(self.dsh_home(), "DSH"))
         procs = self.running()
         if procs:
@@ -3098,6 +3393,13 @@ class DshTarget:
                     log("    [%-6s] %s  %s%s" % (st, os.path.basename(fp), note,
                                                  "  (有备份)" if has_bak else ""),
                         "g" if st in ("loose", "clean") else "y", "dsh")
+        # 还原过的安装根不会出现在 bases 里（app/ 都删了），但状态里不能装作没有 ——
+        # 否则用户以为 DSH 凭空消失了。
+        for _k, _rec in revert_stamp_load(self.dsh_home()).items():
+            _r = (_rec or {}).get("root") or _k
+            if not os.path.isdir(os.path.join(_k, "resources", "app")):
+                log("· %s  [已还原·解包目录已删]  目标 0 个（--apply 会重新解包）" % _r,
+                    "dg", "dsh")
         if not rows:
             log("没有可处理的目标文件（可能 DSH 没装，或用 --dsh-dir 指定）", "y", "dsh")
         return rows
@@ -3125,6 +3427,9 @@ class DshTarget:
     # ---------------- 执行 ----------------
     def apply(self, args, mode):
         """mode: apply / revert / dry-run"""
+        # 只有真正打补丁时才允许发现阶段顺手解包。其余命令（含预演）都不解 ——
+        # 否则 revert 删掉的 resources/app/ 会被下一次运行解回来。
+        DshTarget._unpack_ok = (mode == "apply")
         bases = self.find_bases(getattr(args, "dsh_dir", "") or "")
         if not bases:
             log("未检测到 @deepseek-ai 安装，跳过。（可用 --dsh-dir 指定）", "y", "dsh")
@@ -3209,13 +3514,26 @@ class DshTarget:
                     # v7.4 修：这里原来没有 dry 判断 —— `--revert --dry-run` 会**真的写盘**并删掉备份。
                     # （main 里 args.revert 的分支排在 dry_run 之前，所以预演标志到不了这里。）
                     if getattr(args, "dry_run", False):
-                        log("[预演] 将还原 | " + rel_display(fp, b), "y", "dsh")
+                        # 预演也要说实话：已经干净的别再报"将还原"，否则用户以为
+                        # 还原了 14 个文件，实际一个都没动。
+                        try:
+                            _st0, _ = self.file_state(fp, funcs, want)
+                        except Exception:
+                            _st0 = ""
+                        if _st0 in ("strict", "clean"):
+                            log("[预演] 已是原版，无需还原 | " + rel_display(fp, b), "dg", "dsh")
+                        else:
+                            log("[预演] 将还原 | " + rel_display(fp, b), "y", "dsh")
                         stats["skip"] += 1
                         continue
                     r = self.revert_file(fp)
                     if r == "done":
                         stats["revert"] += 1
                         log("已还原 | " + rel_display(fp, b), "g", "dsh")
+                    elif r == "vault":
+                        stats["revert"] += 1
+                        log("已还原（旁路备份没了，用专属保险库里的原档） | "
+                            + rel_display(fp, b), "g", "dsh")
                     elif r == "nobak" and _is_our_artifact(read_text_safe(fp)):
                         # v7.4：备份没了，但文件确实是我们改过的 —— 如实说明，别让用户
                         # 以为"跳过"等于"已经是原样"，也别拿注入版冒充原档去还原。
@@ -3273,6 +3591,13 @@ class DshTarget:
                 else:
                     _bak = fp + self.bak_suffix
                     backup_file(fp, self.bak_suffix, is_pristine=self.is_pristine)
+                # 旁路备份之外再存一份进专属保险库：清理工具删掉 .bak 之后，
+                # revert 还有东西可吃（"还原不彻底"最常见的成因就是这个）。
+                try:
+                    with open(_bak, "rb") as _bf:
+                        vault_put(self.dsh_home(), fp, _bf.read())
+                except Exception:
+                    pass
                 try:
                     write_text(fp, cur, bom=read_text(fp)[1])
                     # v8.3-CE：写后自检。写完立刻回读，用同一套判据复核"目标态"到底成没成；
@@ -3362,6 +3687,11 @@ class DshTarget:
             if getattr(args, "dry_run", False):
                 if os.path.exists(_pp):
                     log("[预演] 将清理护照与回执行：%s" % avatar_dir_for(h), "y", "dsh")
+                try:
+                    for _k, _p in revert_traces(h, bases, dry=True, deep=getattr(args, "deep", False)):
+                        log("[预演] 将清理 %s | %s" % (_k, _p), "y", "dsh")
+                except Exception:
+                    pass
             else:
                 _removed = 0
                 for _f in ("passport.json", "selfcheck.txt"):
@@ -3388,16 +3718,35 @@ class DshTarget:
                     log(_mnote, "g" if _mok else "y", "dsh")
                 except Exception as _me:
                     log("破甲模式移除异常：%s" % _me, "y", "dsh")
+                # 最后一件事：把我们留在盘上的痕迹清干净。文件还原了但解包目录还在，
+                # DSH 就仍然加载那份副本、厂商升级也盖不过它 —— 那等于没还原。
+                try:
+                    _acts = revert_traces(h, bases, dry=False, deep=getattr(args, "deep", False))
+                    for _k, _p in _acts:
+                        log("已清理 %s | %s" % (_k, _p), "dg", "dsh")
+                    if not _acts:
+                        log("没有需要清理的残留痕迹。", "dg", "dsh")
+                except Exception as _te:
+                    log("痕迹清理异常（可手动删）：%s" % _te, "y", "dsh")
         return stats
 
     def revert_file(self, fp):
         bak = self.backup_path_for(fp)
-        if not os.path.exists(bak):
+        if os.path.exists(bak):
+            try:
+                shutil.copy2(bak, fp)
+                os.remove(bak)
+                return "done"
+            except Exception:
+                return "fail"
+        # 旁路备份没了（被清理工具删掉、或密封目录的 hash 路径对不上）→ 吃保险库。
+        data = vault_get(self.dsh_home(), fp)
+        if data is None:
             return "nobak"
         try:
-            shutil.copy2(bak, fp)
-            os.remove(bak)
-            return "done"
+            with open(_wp(fp), "wb") as f:
+                f.write(data)
+            return "vault"
         except Exception:
             return "fail"
 
@@ -8607,6 +8956,8 @@ def build_parser():
     p.add_argument("--clear", action="store_true",
                    help="配合 --pick 用：清除记住的手动路径，改回自动探测")
     p.add_argument("--dsh-dir", help="手动指定 @deepseek-ai 目录或 DSH Desktop 根")
+    p.add_argument("--deep", action="store_true",
+                   help="还原时连没有标记的 resources/app/ 解包目录一起删（早期版本解的目录没有标记，不删就等于没还原）")
     p.add_argument("--dsh-mode", dest="dsh_mode", choices=["inject", "preset"], default="inject",
                    help="DSH 破甲方式：inject=改磁盘文件（默认）；"
                         "preset=只注册「破甲模式」预设（社区特供，不改任何官方文件，"
