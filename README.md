@@ -232,7 +232,11 @@ f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破�
 
 哈希和文件在同一处发布 —— 能改仓库的人可以同时改掉两者，那不叫交叉验证。所以 exe 走另外两条通道：
 
-**通道一：签名 + 仓库钉定的公钥证书（Windows）。** 锚点证书在 `tools/codesign/pojia-signing.cer`（`CN=Mladery, O=Mladery CE, C=CN`，SHA-256 `ee95267b…c8e413`，有效期至 2036-11-01）。
+**通道一：签名 + 仓库钉定的公钥证书（Windows）。** 锚点证书在 `tools/codesign/pojia-signing.cer`（`CN=Mladery, O=Mladery CE, C=CN`，有效期至 2036-11-01）。指纹是整张证书的 SHA-256，比对这一个值就够：
+
+```
+ee95267b61a4965829338d80a792d3b3810d6b0c2d8045d6842ce1fb22c8e413
+```。
 
 ```text
 .\tools\verify-windows.ps1 -Exe pojia-ce-windows-x64.exe
