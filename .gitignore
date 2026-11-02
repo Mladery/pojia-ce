@@ -49,3 +49,7 @@ dist/
 # set-signing-secrets.ps1 在没装 gh 时会把 pfx 的 base64 落在这里，等用户手动
 # 粘进 GitHub。这就是私钥本身，一个字都不能进仓库。
 .signing-secrets.local/
+
+# temp snapshots
+*.bak
+*.bak-*
