@@ -3,7 +3,7 @@
 [![CI](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/ci.yml)
 [![Build](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml)
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.54-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.55-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。
 > MIT 协议，**非官方**，与原作者无隶属关系；本项目按自己的节奏演进，不跟随上游成品。
 > 仅限在**自己有权管理的本机设备**上使用。**下载或运行前，请先读「[九、法律免责与合规使用声明](#九法律免责与合规使用声明)」。**
@@ -134,6 +134,7 @@ xattr -cr /Applications/Xxx.app
 
 | 版本 | 主题 |
 |---|---|
+| [`v8.55-CE`](CHANGELOG.md#v855-ce-2026-11-03) | 人格库：多套人格可组合 / 变量插值 / 分层解释 |
 | [`v8.54-CE`](CHANGELOG.md#v854-ce-2026-11-02) | macOS：改完 .app 自动 ad-hoc 重签 / `--mac-check` 体检 |
 | [`v8.53-CE`](CHANGELOG.md#v853-ce-2026-11-01) | 界面重做（面向普通用户） / DSH 破甲方式可选 / Git Bash 开关进界面 |
 | [`v8.52-CE`](CHANGELOG.md#v852-ce-2026-11-01) | 打包版带 GUI / Cython 预编译 / 构建收进 `tools/` / 许可归属 |
@@ -157,6 +158,21 @@ xattr -cr /Applications/Xxx.app
 
 **6. Git Bash 接管（Windows，可选，默认关）。** 官方在 Windows 上把 bash 工具和执行器一起关了，只剩 PowerShell 5.1 —— 反引号转义、`$` 展开、没有 `&&`、here-string 必须顶格，模型天天在这上面翻车。`--git-bash` 把四个平台开关翻过来，并装一个十几行的插件把 Git 的 `bin` 提到 `PATH` 最前（Windows 的 `System32\bash.exe` 是 WSL 入口，永远抢先）；本机没有 Git Bash 就从 npmmirror / 清华 / GitHub 下 PortableGit，解压即用、不写注册表。WSL 的 bash 会被真跑一次 `uname -s` 判死并剔除。默认关，因为它改的是宿主行为。
 
+### 人格库（v8.55）
+
+人格不再只有 `persona.md` 一份。把片段丢进 `人格库/`，按名字组合，选中的组合记进 `状态/persona-set.json`，之后每次 `--apply` 自动沿用：
+
+```bash
+python 破甲一键通.py --persona-list             # 看库里有什么（● 是当前启用）
+python 破甲一键通.py --persona-set "作业,输出"   # 组合，顺序即拼接顺序
+python 破甲一键通.py --persona-explain          # 分层解释：每段字节 / 哈希 / 命中层
+python 破甲一键通.py --persona-set ""           # 清空，回到 persona.md
+```
+
+优先级 `--persona` > 人格集 > `persona.md` > `my-prompt.txt` > 内置默认；`--persona` 仍是一次性覆盖。片段里可写 `{{target}}` `{{date}}` `{{os}}` `{{hostname}}` 等变量，编译时替换（写错的 `{{x}}` 原样保留）。**插值只在写盘那一刻求值** —— 静态改模板、不是运行时钩子，想让 `{{date}}` 变就再跑一次 `--apply`。
+
+17 个目标共用这条管线，改一处全部生效。`人格库/` 与 `状态/persona-set.json` 都在 `.gitignore` 里：那是个人配置，不该进仓库。
+
 ### 与上游的差异
 
 截至 2026-11-01，与上游最新公开文档逐条比对：
@@ -177,6 +193,7 @@ xattr -cr /Applications/Xxx.app
 | Kiro（steering） | 未见 | 独立目标，写 `~/.kiro/steering/pojia-inject.md` |
 | `--<key>-dir` 手动指定 | 未见 | 按目标表兜底注册，加目标自动就有 |
 | 写后自检 | 未见 | 回读复核，不合格即按备份回滚 |
+| 人格源 | 单文件，换人格要手工换文件 | 人格库：多片段按名组合、变量插值、`--persona-explain` 分层可查 |
 | Windows 长路径 | 未见 | 超过 240 字符自动加 `\\?\` 前缀 |
 | 免安装可执行文件 | 只有 Windows exe（且带封条/激活码） | Windows / Linux / macOS 四平台，CI 自动出 |
 | 打包版的行为一致性 | — | 人格文件、状态目录、日志都跟着可执行文件走 |
@@ -189,7 +206,7 @@ xattr -cr /Applications/Xxx.app
 ## 六、校验
 
 ```
-5c3eac449bcbff8be9c9236e6c4a05fb37526d07a1f6aec96acc7fa2baa94be4  src/破甲一键通.py           (488,823 B / LF)
+8c7f37fde4d68b723c048864ff6b7508f0df85cd2d9973b058c8f2800d1f75f0  src/破甲一键通.py           (505,298 B / LF)
 4ff11a57d9d349d47b78e3237b276fa0b763bbd1ad547d15f119892e906fe62c  src/破甲GUI.py              (46,610 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
@@ -201,9 +218,9 @@ git clone https://github.com/z91772524-ai/pojia-next && cd pojia-next
 git show 536ece2:破甲一键通.py | sha256sum
 ```
 
-`src/破甲一键通.py` 现在比 `upstream/` 大 137,430 B —— §四 的「只删不加」说的是摘封条那一步（净减）；多出来的字节来自 v8.2 之后的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、破甲模式、守卫、Git Bash 接管、打包适配、macOS 签名重签），逐条见 [CHANGELOG](CHANGELOG.md)。
+`src/破甲一键通.py` 现在比 `upstream/` 大 153,905 B —— §四 的「只删不加」说的是摘封条那一步（净减）；多出来的字节来自 v8.2 之后的新增功能（`wbintl`、`.lnk` 解析、快照体检、DSH 0.2.1-rc.5 适配、镜像层、保险丝探测、写后自检、Kiro 目标、破甲模式、守卫、Git Bash 接管、打包适配、macOS 签名重签、人格库），逐条见 [CHANGELOG](CHANGELOG.md)。
 
-版本号分两段存：`VERSION = "8.54"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.54-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
+版本号分两段存：`VERSION = "8.55"` 是写进护照和标记块的**机器值**，`EDITION = "CE"` 只拼到对外显示上（`VER_TAG = "8.55-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。
 
 ### 产物校验（两条独立通道）
 

@@ -146,6 +146,8 @@ import urllib.request
 import hashlib
 import argparse
 import subprocess
+import platform
+import socket
 import unicodedata
 import datetime as _dt
 
@@ -229,7 +231,7 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess.Popen = _popen_no_window
     subprocess._dsh_no_window_patched = True
 
-VERSION = "8.54"
+VERSION = "8.55"
 # 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
 # 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
 # "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。
@@ -1534,12 +1536,202 @@ def clean_prompt(text):
     return "".join(out).strip()
 
 
-def load_user_persona(override=""):
+# ══════════════════════════════════════════════════════════════════════════════
+#  人格库（persona library）
+#
+#  原来只有一份 persona.md。想同时留着「严格作业」和「创作模式」两套，就得手动
+#  换文件；换完忘了换回去，下一次 --apply 就把错的那套写进 17 个目标，而且写完
+#  还得 --revert 才能退。这一层把人格拆成片段库，按名字组合，选中的组合记进
+#  状态/persona-set.json，之后每次 --apply 自动沿用，不必再带参数。
+#
+#  来源优先级（高 → 低）：
+#      ① --persona 指定单文件           一次性覆盖，不写配置
+#      ② --persona-set / persona-set.json 的组合
+#      ③ 脚本目录 persona.md            原行为，保持兼容
+#      ④ 脚本目录 my-prompt.txt         旧工具遗留
+#      ⑤ 内置默认
+#
+#  另有一层变量插值：片段里可写 {{target}} {{date}} 这类占位符，编译时换成实际值。
+#  只认白名单 —— 写错的 {{whatever}} 原样保留，不会被悄悄吃掉（人格文本里出现
+#  双花括号本身是合法的）。
+#
+#  与 dsh-purge「规则库 → 启用某个规则集」同源，实现独立：它写宿主的
+#  prompt-inject.md 并在运行时装配，我们只在自己这层拼文本、写进各目标模板。
+# ══════════════════════════════════════════════════════════════════════════════
+
+PERSONA_DIR = os.path.join(HERE, "人格库")
+PERSONA_CONF = os.path.join(STATE_DIR, "persona-set.json")
+PERSONA_MAX_KB = 512              # 单片段上限：再大就不像人格，更像误选了大文件
+PERSONA_VAR_RE = re.compile(r"\{\{\s*([a-z_]{2,24})\s*\}\}")
+
+
+def persona_read(path):
+    """读一份人格片段 → (文本, 错误说明)。
+
+    比 load_user_persona 的老逻辑更严：这里要把多份拼在一起，一份坏的必须当场
+    报出来 —— 悄悄跳过会造成「我明明加了 a.md 怎么没生效」这种极难查的问题。
+    """
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except Exception as e:
+        return "", "读不了（%s）" % e
+    if len(raw) > PERSONA_MAX_KB * 1024:
+        return "", "太大（%d KB，上限 %d KB）" % (len(raw) // 1024, PERSONA_MAX_KB)
+    try:
+        txt = raw[3:].decode("utf-8") if raw.startswith(b"\xef\xbb\xbf") else raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        return "", "不是 UTF-8 文本（%s）" % e
+    _ctrl = [c for c in txt if ord(c) < 0x20 and c not in "\r\n\t"]
+    if _ctrl:
+        return "", "含 %d 个控制字符（例如 U+%04X），像二进制文件" % (len(_ctrl), ord(_ctrl[0]))
+    if "\ufffd" in txt:
+        return "", "含 U+FFFD（解码失败标记），源文件编码不对"
+    return clean_prompt(txt), ""
+
+
+def persona_library():
+    """人格库里可用的片段 → [(名字, 路径, 字节)]，按名字排序。"""
+    out = []
+    if not os.path.isdir(PERSONA_DIR):
+        return out
+    try:
+        names = sorted(os.listdir(PERSONA_DIR))
+    except OSError:
+        return out
+    for fn in names:
+        if not fn.lower().endswith((".md", ".txt")) or fn.startswith("."):
+            continue
+        p = os.path.join(PERSONA_DIR, fn)
+        if not os.path.isfile(p):
+            continue
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            size = 0
+        out.append((os.path.splitext(fn)[0], p, size))
+    return out
+
+
+def persona_conf_get():
+    """当前启用的组合 → [名字]。配置缺失/损坏都返回 []，绝不因此挡住 --apply。"""
+    try:
+        with open(PERSONA_CONF, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        names = d.get("sets") if isinstance(d, dict) else None
+        return [str(x).strip() for x in (names or []) if str(x).strip()]
+    except Exception:
+        return []
+
+
+def persona_conf_set(names):
+    """写启用组合。原子写：先落临时文件再替换，写一半断电也不会留下半个 json。"""
+    try:
+        d = os.path.dirname(PERSONA_CONF)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = PERSONA_CONF + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump({"sets": list(names),
+                       "updated": time.strftime("%Y-%m-%dT%H:%M:%S")},
+                      f, ensure_ascii=False, indent=2)
+        os.replace(tmp, PERSONA_CONF)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def persona_vars(target="DSH"):
+    """插值变量表。全部在编译期求值 —— 我们是写盘，不是运行时钩子，写进去就是死值。"""
+    try:
+        host = socket.gethostname()
+    except Exception:
+        host = ""
+    try:
+        osc = (platform.system() + " " + platform.release()).strip()
+    except Exception:
+        osc = sys.platform
+    return {
+        "target": target or "DSH",
+        "date": time.strftime("%Y-%m-%d"),
+        "datetime": time.strftime("%Y-%m-%d %H:%M"),
+        "script_version": VER_TAG,
+        "os": osc,
+        "hostname": host,
+        "repo": REPO_URL,
+    }
+
+
+def persona_interpolate(text, target="DSH"):
+    """替换白名单变量 → (文本, 用到的变量名列表)。不在表里的 {{x}} 原样保留。"""
+    if not text or "{{" not in text:
+        return text, []
+    vals = persona_vars(target)
+    used = []
+
+    def _sub(m):
+        k = m.group(1)
+        if k in vals:
+            used.append(k)
+            return vals[k]
+        return m.group(0)
+
+    return PERSONA_VAR_RE.sub(_sub, text), sorted(set(used))
+
+
+def persona_compose(names, target="DSH"):
+    """按顺序拼接多份片段 → (文本, [(名字, 字节, 说明)])。
+
+    拼接用空行分隔，不加任何来源注释 —— 注释会被 clean_prompt 吃掉，加了等于没加，
+    想看来源用 --persona-explain。
+    """
+    parts, chunks = [], []
+    for nm in names:
+        p = ""
+        for ext in (".md", ".txt"):
+            cand = os.path.join(PERSONA_DIR, nm + ext)
+            if os.path.isfile(cand):
+                p = cand
+                break
+        if not p:
+            parts.append((nm, 0, "人格库里没有这个片段"))
+            continue
+        txt, err = persona_read(p)
+        if err:
+            parts.append((nm, 0, err))
+            continue
+        if not txt:
+            parts.append((nm, 0, "内容为空（只有注释）"))
+            continue
+        chunks.append(txt)
+        parts.append((nm, len(txt.encode("utf-8")), os.path.basename(p)))
+    body = "\r\n\r\n".join(chunks)
+    body, _used = persona_interpolate(body, target)
+    return body, parts
+
+
+def load_user_persona(override="", sets=None, target="DSH"):
     """返回用户自定义人格文本（可能为空串）。
 
-    优先级：--persona > 脚本目录/persona.md > 脚本目录/my-prompt.txt（兼容旧工具）> 内嵌默认。
+    优先级：--persona 单文件 > 人格集组合（--persona-set / persona-set.json）
+            > 脚本目录/persona.md > 脚本目录/my-prompt.txt（兼容旧工具）> 内嵌默认。
     返回 (文本, 来源说明)。文本里若只有注释 -> 视为空（那就只用内置政策）。
+
+    sets 为 None 时读配置；传 [] 表示「这一轮明确不要人格集」。
     """
+    # ① 人格集组合（--persona 给了就以它为准，不再叠库里的）
+    if not override:
+        use = list(sets) if sets else persona_conf_get()
+        if use:
+            txt, parts = persona_compose(use, target)
+            if txt:
+                bad = [p for p in parts if p[1] == 0]
+                note = "人格库 %s" % " + ".join(use)
+                if bad:
+                    note += "（%s 跳过：%s）" % (bad[0][0], bad[0][2])
+                return txt, note
+            say("[!] 人格集 %s 里没取到可用内容，回落到下一层人格源。" % " + ".join(use), "y")
+
     cands = []
     if override:
         cands.append((override, "命令行 --persona"))
@@ -1584,6 +1776,7 @@ def load_user_persona(override=""):
             txt = "\n".join(ln for ln in txt.splitlines()
                             if ln.strip() and not ln.strip().startswith("#")).strip()
         if txt:
+            txt, _used = persona_interpolate(txt, target)
             return txt, "%s（%s）" % (label, os.path.basename(path))
     return "", "内置默认"
 
@@ -8147,8 +8340,9 @@ class _MarkBlockTarget:
         """镜像块（独立标记）。正文由 build_mirror_text 出，不吃 persona 参数。"""
         if not self.mirror_begin:
             return ""
-        user, _src = load_user_persona("")
-        mt = build_mirror_text(user, self.label)
+        # 镜像正文只有覆盖声明 + 自证口令，不含人格（看 build_mirror_text 的实现），
+        # 传空串即可 —— 以前在这里白读一次人格文件，启用「人格库」后还会白拼一遍。
+        mt = build_mirror_text("", self.label)
         if not mt.strip():
             return ""
         return "%s\n%s\n%s\n" % (self.mirror_begin, mt.rstrip(), self.mirror_end)
@@ -8606,8 +8800,7 @@ class CodexTarget(_MarkBlockTarget):
         dest = self._instr_path(home)
         try:
             body = persona.rstrip("\n") + "\n"
-            user, _s = load_user_persona(getattr(args, "persona", "") or "")
-            mt = build_mirror_text(user, self.label)
+            mt = build_mirror_text("", self.label)
             if mt.strip():
                 body += "\n%s\n%s\n%s\n" % (MIRROR_BEGIN, mt.rstrip(), MIRROR_END)
             write_text(dest, body, make_dirs=True)
@@ -9915,6 +10108,15 @@ def build_parser():
     p.add_argument("--force", action="store_true",
                    help="已破甲的目标也强制重写成统一版本（统一人格哈希）")
     p.add_argument("--persona", help="人格文件（默认脚本目录 persona.md）")
+    p.add_argument("--persona-list", action="store_true",
+                   help="只读：列出人格库（人格库/）里的片段与当前启用的组合")
+    p.add_argument("--persona-set", metavar="NAMES", default=None,
+                   help="设定启用的人格组合（逗号分隔，按顺序拼接；给空串=清空。"
+                        "写进 状态/persona-set.json，之后每次 --apply 自动沿用）")
+    p.add_argument("--persona-show", action="store_true",
+                   help="只读：打印当前组合编译后的最终人格文本")
+    p.add_argument("--persona-explain", action="store_true",
+                   help="只读：分层解释人格来源（每段字节 / SHA256 / 插值变量 / 总大小）")
     p.add_argument("--pick", metavar="TARGET",
                    help="弹系统目录选择窗口，手动指定某个目标的安装位置并记住"
                         "（" + " / ".join(list(TARGETS)) + "）")
@@ -10043,6 +10245,165 @@ def _default_to_gui(args):
             and not getattr(args, "menu", False))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  人格库 CLI（--persona-list / --persona-set / --persona-show / --persona-explain）
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _persona_explain(args):
+    """逐层列出来源与体积，最后给编译结果。只读，不改任何盘。"""
+    say("")
+    say(BOLD("人格编译解释（只读）"))
+    say(GRAY("  优先级：--persona > 人格集 > persona.md > my-prompt.txt > 内置默认"))
+    say("")
+    cur = persona_conf_get()
+    picked = ""
+
+    def _row(tag, label, txt, err=""):
+        if err:
+            say("  %s %-24s %s" % (tag, label, err), "red")
+            return 0
+        if not txt:
+            say("  %s %-24s %s" % (tag, label, "空 / 只有注释"), "dg")
+            return 0
+        raw = txt.encode("utf-8")
+        say("  %s %-24s %7d B   sha256 %s"
+            % (tag, label, len(raw), hashlib.sha256(raw).hexdigest()[:12]))
+        return len(raw)
+
+    if args.persona:
+        txt, err = persona_read(os.path.abspath(args.persona))
+        if _row("①", "--persona " + os.path.basename(args.persona), txt, err):
+            picked = "①"
+    else:
+        say("  %s %-24s %s" % ("①", "--persona", "未指定"), "dg")
+
+    if cur:
+        body, parts = persona_compose(cur, "DSH")
+        for nm, n, note in parts:
+            if n:
+                say("  %s %-24s %7d B" % ("②", "人格集:" + nm, n))
+            else:
+                say("  %s %-24s %s" % ("②", "人格集:" + nm, "跳过：" + note), "red")
+        if body and not picked:
+            picked = "②"
+    else:
+        say("  %s %-24s %s" % ("②", "人格集", "未启用"), "dg")
+
+    for tag, label, path in (("③", "persona.md", PERSONA_FILE),
+                             ("④", "my-prompt.txt", LEGACY_PROMPT)):
+        if not os.path.isfile(path):
+            say("  %s %-24s %s" % (tag, label, "不存在"), "dg")
+            continue
+        txt, err = persona_read(path)
+        if _row(tag, label, txt, err) and not picked:
+            picked = tag
+
+    say("  %s %-24s %s" % ("⑤", "内置默认", "永远可用（空人格 + 内置政策）"), "dg")
+
+    user, src = load_user_persona(args.persona or "", target="DSH")
+    raw = user.encode("utf-8")
+    allvars = persona_vars("DSH")
+    # 变量要从**插值前**的原文里找：编译结果里 {{...}} 早被替换掉了，
+    # 在结果上 finditer 只会永远返回空（这个坑踩过一次）。
+    _origin = ""
+    for _nm in cur:
+        for _ext in (".md", ".txt"):
+            _p = os.path.join(PERSONA_DIR, _nm + _ext)
+            if os.path.isfile(_p):
+                _t, _e = persona_read(_p)
+                _origin += (_t or "")
+                break
+    if args.persona and os.path.isfile(args.persona):
+        _t, _e = persona_read(os.path.abspath(args.persona))
+        _origin += (_t or "")
+    used = sorted(set(m.group(1) for m in PERSONA_VAR_RE.finditer(_origin))) if _origin else []
+    unknown = [v for v in used if v not in allvars]
+    say("")
+    say(BOLD("  编译结果"))
+    say("    命中层   : %s" % (picked or "⑤"))
+    say("    实际来源 : %s" % src)
+    say("    文本体积 : %d B（%d 字）" % (len(raw), len(user or "")))
+    say("    SHA256   : %s" % (hashlib.sha256(raw).hexdigest() if raw else "(空)"))
+    if used:
+        say("    已插值   : %s" % ", ".join("{{%s}}" % v for v in used if v in allvars), "c")
+    if unknown:
+        say("    未识别   : %s（原样保留）" % ", ".join("{{%s}}" % v for v in unknown), "y")
+    say(GRAY("    注意：插值在写盘那一刻求值。我们是静态改模板、不是运行时钩子，"))
+    say(GRAY("          {{date}} 这类不会随会话刷新 —— 要刷新就再跑一次 --apply。"))
+    return 0
+
+
+def run_persona(args):
+    """四个人格开关的实现。返回进程退出码（0 成功 / 1 有问题）。"""
+    acted = False
+    rc = 0
+
+    # 唯一的写操作：只写本项目自己的配置，不碰任何客户端文件。
+    if args.persona_set is not None:
+        raw = (args.persona_set or "").strip()
+        names = [x for x in re.split(r"[,;+\s]+", raw) if x]
+        clean_names, missing = [], []
+        for nm in names:
+            nm = os.path.splitext(nm)[0]
+            if any(os.path.isfile(os.path.join(PERSONA_DIR, nm + ext)) for ext in (".md", ".txt")):
+                if nm not in clean_names:
+                    clean_names.append(nm)
+            else:
+                missing.append(nm)
+        if missing:
+            say("[!] 人格库里没有这些片段：%s" % ", ".join(missing), "red")
+            say("    已有的用 --persona-list 看；片段放这里：%s" % PERSONA_DIR, "y")
+            rc = 1
+        ok, err = persona_conf_set(clean_names)
+        if not ok:
+            say("[!] 写配置失败：%s（%s）" % (err, PERSONA_CONF), "red")
+            return 1
+        if clean_names:
+            say("[OK] 已启用人格组合：%s" % " + ".join(clean_names), "g")
+            say("     之后每次 --apply 自动沿用；清空用 --persona-set \"\"", "dg")
+        else:
+            say("[OK] 已清空人格组合，回到 persona.md / 内置默认。", "g")
+        acted = True
+
+    if args.persona_list:
+        lib = persona_library()
+        cur = persona_conf_get()
+        say("")
+        say(BOLD("人格库  %s" % PERSONA_DIR))
+        if not os.path.isdir(PERSONA_DIR):
+            say("  （目录还不存在，--persona-set 的片段要放进去）", "dg")
+        elif not lib:
+            say("  （空）", "dg")
+        for nm, p, size in lib:
+            mark = CYAN("●") if nm in cur else " "
+            say("  %s %-20s %8d B   %s" % (mark, nm, size, os.path.basename(p)))
+        say("")
+        if cur:
+            say("  当前组合：%s" % " + ".join(cur), "c")
+        else:
+            say("  当前组合：（未启用，走 persona.md 或内置默认）", "dg")
+        say("  用法：--persona-set \"名字1,名字2\"   顺序即拼接顺序", "dg")
+        say("        片段是普通 UTF-8 文本；可用 {{target}} {{date}} {{os}} {{hostname}} 等变量", "dg")
+        acted = True
+
+    if args.persona_show:
+        user, src = load_user_persona(args.persona or "", target="DSH")
+        say("")
+        say(GRAY("── 来源：%s；%d 字节 ──"
+                 % (src, len((user or "").encode("utf-8")))))
+        say(user if user else "（空 —— 只用内置政策）")
+        acted = True
+
+    if args.persona_explain:
+        rc = _persona_explain(args) or rc
+        acted = True
+
+    if not acted:
+        say("--persona-list / --persona-set / --persona-show / --persona-explain 选一个用", "y")
+    return rc
+
+
 def main():
     global QUIET, _pause_needed, READONLY
     check_runtime()
@@ -10058,6 +10419,17 @@ def main():
         return
     if args.quiet:
         QUIET = True
+
+    # 人格库子命令。list/show/explain 打印完就退出；--persona-set 只改本项目自己的
+    # 配置。要是在同一条命令里还给了 --apply / --revert / --status，就先定组合再
+    # 往下走（顺序很重要：配置写完，本轮 apply 才能读到新组合）。
+    if (getattr(args, "persona_list", False) or getattr(args, "persona_show", False)
+            or getattr(args, "persona_explain", False)
+            or getattr(args, "persona_set", None) is not None):
+        _prc = run_persona(args)
+        if not (args.apply or args.revert or args.dry_run or args.status):
+            return _prc
+
     if args.restore:
         args.revert = True
     args.full = args.full or False
