@@ -76,7 +76,7 @@ Claude 再加 `CLAUDE_ADDENDUM` 六条：拒绝必须写出命中的边界编号
 
 ### 未跟随新版的目标如实标注
 
-`--status` 给 12 个自上游 v8.14 起没再适配的目标（codex / cursor / claude / gemini / qwen / iflow / trae / codebuddy / opencode / windsurf / cline / copilot）加一行「客户端改版后可能静默失效」。不是所有目标都能一直跟，标出来比假装在跟强。
+`--status` 给 12 个自上游 v8.14 起没再适配的目标（codex / cursor / claude / gemini / qwen / iflow / trae / codebuddy / opencode / windsurf / cline / copilot）加一行「客户端改版后可能静默失效」。其中 codex / claude 单独标成「加过通道，仍可能失效」—— 做过适配不等于跟上了新版，两句话不能混成一句。
 
 ### 验证
 

@@ -9660,11 +9660,14 @@ TARGETS = {"dsh": DshTarget, "wb": WorkBuddyTarget, "wbintl": WorkBuddyGlobalTar
            "trae": TraeTarget, "codebuddy": CodeBuddyTarget, "opencode": OpenCodeTarget,
            "windsurf": WindsurfTarget, "cline": ClineTarget, "copilot": CopilotTarget,
            "kiro": KiroTarget}
-# 上游 v8.14 之后停止适配的目标：类体一字未改，客户端一改路径就会静默失效。
-# codex 只修过 config.toml 重复键，没跟新版，所以也列进来。
+# 上游 v8.14 之后停止适配的目标：没再跟客户端新版，客户端一改路径就会静默失效。
+# codex 只修过 config.toml 重复键、v8.58 加了 profile 检查；claude v8.58 加了
+# output style 通道 —— 都算"加过通道"，但都没跟新版，提示语要能区分。
 # 这张表只用于 --status 里如实提示，不影响功能 —— 显式 --target 照样能跑。
 UNFOLLOWED = ("codex", "cursor", "claude", "gemini", "qwen", "iflow",
               "trae", "codebuddy", "opencode", "windsurf", "cline", "copilot")
+# 做过通道增强、但仍未跟随客户端新版的目标。
+ENHANCED = ("codex", "claude")
 
 TARGET_ALIAS = {"workbuddy": "wb",
                 "workbuddy-ai": "wbintl", "workbuddyai": "wbintl",
@@ -9841,7 +9844,10 @@ def run_status(args, targets=None, allow_ask=False):
         say("")
         say(BOLD(CYAN("── %s ──────────────────────────────────────────" % t.label)))
         if k in UNFOLLOWED:
-            say("  （未跟随新版：自上游 v8.14 起未再适配；客户端改版后可能静默失效）", "dg")
+            if k in ENHANCED:
+                say("  （未跟随新版：v8.58 加过通道，客户端改版后仍可能静默失效）", "dg")
+            else:
+                say("  （未跟随新版：自上游 v8.14 起未再适配；客户端改版后可能静默失效）", "dg")
         try:
             t.dump(args, "diagnose" if getattr(args, "diagnose", False) else "status")
         except Exception as e:
