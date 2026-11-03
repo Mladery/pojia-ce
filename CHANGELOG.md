@@ -82,6 +82,12 @@ Claude 再加 `CLAUDE_ADDENDUM` 六条：拒绝必须写出命中的边界编号
 
 `tests/test_claude_style.py` 四条：专用段只挂 codex / claude（其余目标逐字不变）、output style 应用 + 幂等 + 还原、原来有 `outputStyle` 要写回、`settings.json` 坏了不动。全量 146 passed。
 
+### 文档：实机截图与参与入口
+
+README 补一节「界面」：首屏（选软件 / DSH 处理方式 / 这次会做什么）直接铺开，确认框折进 `<details>`。两张图都是 v8.58 实机截的，只裁掉页面下方空白，没修内容 —— 界面的说服力不在文案里，在长得像不像一个能点的东西。
+
+同时补「参与」一节，把 PR 的尺寸说清楚：带测试、只动相关类、附 `--diagnose`、提交信息按 conventional commits。作者是学生，合并慢几天属于常态，先写在明面上，省得 PR 挂着两周没人理还以为被无视。
+
 ---
 
 ## v8.57-CE (2026-11-03)

@@ -8,6 +8,7 @@
 [![Build](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml/badge.svg)](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![Stars](https://img.shields.io/github/stars/Mladery/pojia-ce?style=social)](https://github.com/Mladery/pojia-ce/stargazers)
 
 **一句话：把你电脑上 17 个 AI 客户端「自己改不到的内置提示词」，换成你自己写的那份。**
 
@@ -20,6 +21,8 @@
 
 > 它**不修改软件本体**：只做文本文件层面的替换，不删包、不碰注册表 / 服务、不产生网络请求。
 
+**用着顺手就给个 Star** —— 没有推广预算，涨星全靠路过的人随手点一下。发现 bug 请开 issue，比在群里问更容易被记住。
+
 ## 使用边界（必读）
 
 > 以下是摘要。**为了不让 README 过于冗长，初次下载的用户请务必读一遍 [完整免责声明](docs/免责声明.md)** —— 11 条，含许可边界、滥用后果与权利人通知渠道。
@@ -30,6 +33,19 @@
 - **无后门、无遥测。** 无账号、无登录、无统计、无云控、无静默更新，核心流程全程离线。唯一的外部连接是 `--install-git`（可选，只下载不上传）。
 - **后果自负。** 按现状（AS IS）提供，无任何担保。目标客户端可能异常、更新失效、配置损坏或账号受限 —— 这些风险由使用者承担。
 - **严禁违法用途。** 不得用于未授权侵入、数据窃取、制作传播恶意程序，或生成法律明令禁止的内容。工具解除的是客户端的内容限制，不免除任何法律责任。
+
+## 界面
+
+![首屏：选软件、DSH 处理方式、这次会做什么](docs/images/screenshot-home.png)
+
+<details>
+<summary>点「一键破甲」会先弹确认框（截图）</summary>
+
+![确认框：列出要改哪些软件、改什么、怎么反悔](docs/images/screenshot-confirm.png)
+
+</details>
+
+就是本机网页 UI：脚本起一个只绑 `127.0.0.1` 的页面，带随机 token，关掉窗口即退出。截图取自 v8.58 实机（Windows，17 个目标全勾选），只裁掉了页面下方的空白，内容未做任何修饰。
 
 ## 支持的目标
 
@@ -280,6 +296,7 @@ src/破甲GUI.py                  图形界面：本机网页 UI，零依赖
 upstream/破甲一键通.v8.14.py    上游 536ece2 的原始核心，未改动，用于比对
 tests/                         测试：标记块往返 / 保险丝 / 目标注册表 / 冒烟 / Git Bash
 tools/                         签名工具与验签锚点证书
+docs/                          完整免责声明、逐版发布说明、界面截图
 evidence/                      取证材料：提交时间线、群聊记录、防二改机制拆解
 ```
 
@@ -290,6 +307,19 @@ python -m pip install pytest && python -m pytest tests -q
 ```
 
 **注意同名**：上游发行包里的 `破甲GUI.py` 和本仓库的 `src/破甲GUI.py` 只是重名，没有继承关系。上游那份绑了群号登录、激活码校验、云控下发与静默更新，本仓库不收不改不兼容；这份是重写的本机网页 UI，没有账号、没有激活码、不联网、不自动更新。
+
+## 参与
+
+**欢迎 PR。** 作者是学生，白天上课，合并可能慢几天 —— 不是不理，是真的没空，见谅。
+
+提之前顺手过一遍：
+
+- `python -m pytest tests -q` 全绿。改行为的 PR 请带上能复现问题的测试，光改代码没有测试的一律先挂着
+- 只改一个目标就只动那个类。别顺手重排整个文件 —— 格式化噪音会把真正的改动淹掉
+- 新目标适配请附客户端版本号和 `--diagnose` 输出（本机路径自己打个码）
+- 提交信息按 `feat(scope): …` / `fix(scope): …` / `docs(scope): …` 写，CHANGELOG 我来补
+
+不写代码也帮得上忙：报一个能复现的 bug、补一段某客户端的安装路径、把 README 里过时的说明指出来，都算。
 
 ## 许可与独立性
 
