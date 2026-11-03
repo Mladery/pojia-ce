@@ -258,3 +258,103 @@ curl -s https://raw.githubusercontent.com/z91772524-ai/pojia-next/main/更新日
 8.28 三修，全部来自留言板与 issue #19 的实测反馈：Trae 国内版 `~/.trae-cn` 检测不到、DSH 0.2.1-rc.3 常量改名（`WORKSPACE_CONTEXT_INTRO` → `AGENT_INSTRUCTIONS_INTRO`）导致靶点不命中并被自检回滚、asar 解包遇 >260 字符路径崩溃（补 `\\?\` 前缀）。
 
 即：闭源收费后客户端的维护内容是**检测与兼容性 bug**，无能力增量；而定位、靶点、人格替换这些核心思路，正是第 1 节署名墙里那 6 个开源项目公开过的东西。
+
+## 六、8.29–8.30 增补：客户端收缩 + 订阅收费（2026-11-03 复核）
+
+> 复核方式：拉取 GitHub Release 附件 `pojia-next-v8.29-exe.zip`，用附件官方摘要校验后解包，直接读包内的客户端核心；另取 `README.md` 两次提交的 diff 与领码站配置接口。
+> 时间一律北京时间（UTC+8），括号内为 API 原始 UTC。
+
+### 1. 发行包里带着客户端核心源码
+
+v8.29 的 Release 只挂两个附件，其中一个 zip：
+
+| 项 | 值 |
+|---|---|
+| 附件 | `pojia-next-v8.29-exe.zip`，22,775,790 B |
+| GitHub 摘要 | `sha256:03e20e7fd656d838c774a311f605e9a448526505279f7f780ad803c7be80d877` |
+| 本地实算 | `03e20e7f…d877`（逐位相同，说明拿到的是原包） |
+| 包内条目 | 13 个，含 `服务端核心/破甲一键通-核心8.29.py` |
+| 该文件 | 485,009 B / 9,075 行，`sha256 0a20a682199a40a29e67136562a98c062bf54b4e51f58458ca52f84b9f01bbed` |
+
+**目录名叫「服务端核心」，内容是本机客户端核心。** 判据：
+
+- 导入只有标准库（`os` `re` `sys` `json` `argparse` `subprocess` `hashlib` `platform` …），没有 `flask` / `sqlite3` / `http.server`；
+- 16 个目标类齐全：`DshTarget` `WorkBuddyTarget` `ZCodeTarget` `_MarkBlockTarget` `CodexTarget` `CursorTarget` `ClaudeTarget` `GeminiTarget` `QwenTarget` `IflowTarget` `TraeTarget` `CodeBuddyTarget` `OpenCodeTarget` `WindsurfTarget` `ClineTarget` `CopilotTarget`；
+- 命令行开关沿用原样：`--apply`（15 处）、`--revert`（14 处）、`--status`（11 处）、`--target`（13 处）；
+- 结尾是 `if __name__ == "__main__": main()`；
+- v8.14 那套封条仍在：`_SEALED` 16 处、`_k0`/`_k1`/`_k2`/`_d0`/`_d1`/`_d2`/`_seal_decode`/`_seal_verify_source` 全部在位；
+- `VERSION = "8.29.1"`（第 220 行），`py_compile` 通过。
+
+也就是说，`d00b305`（10-13）从仓库删掉的那份源码，并没有真的「本地保留」，而是随付费包一起发了出来 —— 只是换了目录名。
+
+复核：
+
+```bash
+curl -L -o v829.zip https://github.com/z91772524-ai/pojia-next/releases/download/v8.29/pojia-next-v8.29-exe.zip
+sha256sum v829.zip          # 03e20e7f…d877
+unzip -l v829.zip           # 13 个条目，含 服务端核心/破甲一键通-核心8.29.py
+```
+
+### 2. 对外口径：十五个客户端 → 三个
+
+| 北京时间 | 提交 | 改动 | 内容 |
+|---|---|---|---|
+| 11-03 12:08 | [`9229a56`](https://github.com/z91772524-ai/pojia-next/commit/9229a56) | README +8/−29 | 删掉 12 个目标的支持表、注入方式说明与「9 个 v8.5 新目标走标记块」整段 |
+| 11-03 13:08 | [`75930a7`](https://github.com/z91772524-ai/pojia-next/commit/75930a7) | README +1/−1 | 「支持十五个客户端」改为「支持三个客户端」 |
+| 11-03 14:07 | [`d7a4d44`](https://github.com/z91772524-ai/pojia-next/commit/d7a4d44) | README | TG 群改为 `t.me/pojia666` |
+
+代码侧的对应改动（`core829.py`）：
+
+```python
+8334  TARGETS = {"dsh": DshTarget, "wb": WorkBuddyTarget, "zcode": ZCodeTarget}
+8337  _HIDDEN_TARGETS = {"codex": CodexTarget, "cursor": CursorTarget, ...}   # 12 个
+8355  DEFAULT_TARGETS = ["dsh", "wb", "zcode"]
+```
+
+`resolve_targets("all")` 返回 `DEFAULT_TARGETS`，所以默认执行只碰三个；显式 `--target codex` 仍能解析。发版公告的原话：
+
+> **只保留三个客户端**：界面只显示 DSH / WorkBuddy / ZCode。其余 12 个目标不再出现在列表里（代码保留，命令行显式调用仍可用）。
+> 移除 12 个无用目标的扫描后，启动扫描耗时明显下降（原来每次并行扫 15 个，现在只扫 3 个）。
+
+### 3. 那 12 个目标已经停更
+
+以 `536ece2`（v8.14，源码时代最后一版）与包内 `8.29.1` 核心逐类对比：
+
+| 状态 | 目标 | 说明 |
+|---|---|---|
+| 类本体一字未改 | Claude / Cline / CodeBuddy / Gemini / iFlow / OpenCode / Qwen / Windsurf / Copilot | 与 v8.14 完全相同，只被挪进 `_HIDDEN_TARGETS` |
+| 小修 | Cursor（+3）/ Codex（+21）/ Trae（+18） | 镜像层接入与还原剥离、Codex 认 `config.toml` 的键、Trae 增加 `.trae-cn` |
+| 真在维护 | DSH（908→1,271 行）/ WorkBuddy（2,151→2,210）/ ZCode（496→497） | 全部增量集中在这三个 |
+
+共享基类 `_MarkBlockTarget` 在 v8.27 加过一次镜像层（348→387 行），此后没有针对隐藏目标的功能改动。
+
+### 4. 收费：入口 5 元，按天订阅
+
+领码站 `https://aaaa.yiye.pw/codeweb/` 自身请求的配置接口 `GET /api/paycfg` 返回：
+
+```json
+{"ok":1,"amount":5.0,"upgrade_price":5.0,"upgrade_days":3,
+ "upgrade_plans":[{"id":"d3","price":5.0,"days":3,"label":"3 天","tag":"体验"},
+                  {"id":"w1","price":10.0,"days":7,"label":"7 天","tag":"周卡"},
+                  {"id":"m1","price":19.9,"days":30,"label":"30 天","tag":"月卡"}],
+ "upgrade_stack":true}
+```
+
+页面文案与接口不一致，两点：
+
+1. 须知写「领取激活码时需要先支付 **3 元**」「每个 QQ 号仅需支付一次，领取后激活码**长期有效**」，接口实际是 **5 元起、按天计**（3 天 5 元 / 7 天 10 元 / 30 天 19.9 元，可叠加 `upgrade_stack`）；
+2. 同页另一处写「开通后该 QQ 绑定的激活码**在有效期内**可任意机器登录（到期自动恢复一码一机）」—— 与「长期有效」自相矛盾，且与套餐天数一致。
+
+其余规则：绑首台机器、换机走「设备解绑」、支付后不退款、一人一码禁转售、QQ 仅作登记标识（不要求进群，也不做退群核查）。
+
+### 5. 这条线的形状
+
+| 阶段 | 时间 | 对外表述 | 实际行为 |
+|---|---|---|---|
+| 开源 | 至 10-12 | 「完全免费开源」 | 源码在仓库 |
+| 撤源码 | 10-13 | 「源码不再随仓库分发，本地保留」 | 仓库删文件，成品转 exe |
+| 转成品 | 10-15 至 10-29 | 「只发成品」「转入 Cython 发行」 | 云验证 + 云控 + 广告位 |
+| 收紧 | 11-02 至 11-03 | 「支持三个客户端」 | 默认只扫三个，12 个转 `_HIDDEN_TARGETS` |
+| 收费 | 11-03 起 | 「3 元一次、长期有效」 | 接口 5 元起，3/7/30 天套餐，可叠加 |
+
+结论：**「砍掉可注入」不是能力退化，是产品收缩**。代码里 15 个目标一个没删，只是不再对外承诺；同时把「免费」换成了按天订阅，并把删掉的源码随包发了回来。对外话术与代码行为，从 10-13 起就没有对齐过。

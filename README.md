@@ -212,8 +212,9 @@ python 破甲一键通.py --persona-set ""           # 清空，回到 persona.m
 | Windows 长路径 | 未见 | 超 240 字符自动加 `\\?\` |
 | 免安装可执行文件 | 只有 Windows exe（带封条 / 激活码） | 四平台，CI 自动出 |
 | 目标数量 | 15 | 17 |
+| 默认目标（`all`） | 3（上游最新版起只扫 DSH / WorkBuddy / ZCode，其余 12 个转隐藏表） | 17 |
 
-> 保留意见：上游自 v8.14 起不再公开源码，上表依据其 README 与更新日志比对，「未见」只代表文档未声明，不等于其代码中一定没有。
+> 保留意见：上游 2026-10-13 从仓库删除了源码（`d00b305`），但最新发行包（2026-11-02）的 `服务端核心/` 目录里仍附带客户端核心源码（485,009 B / 9,075 行），所以上表可以直接对着源码核对，不只依据文档。逐类比对见 [evidence/EVIDENCE.md](evidence/EVIDENCE.md) 第六节。
 
 </details>
 
@@ -287,4 +288,4 @@ python -m pip install pytest && python -m pytest tests -q
 
 ## 证据
 
-`evidence/` 里三份独立文档，与工具本身无关，供需要溯源的人自取：[EVIDENCE.md](evidence/EVIDENCE.md)（上游 112 条提交逐条记录）、[群聊取证.md](evidence/群聊取证.md)（官方群推广行为，QQ 号已打码）、[反二改保护.md](evidence/反二改保护.md)（三层「防二改」机制拆解：技术有效，许可无效）。
+`evidence/` 里三份独立文档，与工具本身无关，供需要溯源的人自取：[EVIDENCE.md](evidence/EVIDENCE.md)（上游 112 条提交逐条记录；第六节是发行包内含客户端核心源码与 3 个目标收缩的复核）、[群聊取证.md](evidence/群聊取证.md)（官方群推广行为，QQ 号已打码）、[反二改保护.md](evidence/反二改保护.md)（三层「防二改」机制拆解：技术有效，许可无效）。
