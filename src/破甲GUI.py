@@ -118,7 +118,7 @@ TARGETS = [
     ("codex", "Codex CLI"),
     ("cursor", "Cursor"),
     ("claude", "Claude Code"),
-    ("gemini", "Gemini CLI"),
+    ("antigravity", "Antigravity"),
     ("qwen", "Qwen Code"),
     ("iflow", "iFlow"),
     ("trae", "Trae"),
