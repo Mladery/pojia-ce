@@ -227,7 +227,7 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess.Popen = _popen_no_window
     subprocess._dsh_no_window_patched = True
 
-VERSION = "8.58"
+VERSION = "8.59"
 # 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
 # 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
 # "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。
@@ -440,6 +440,12 @@ CURSOR_LEGACY_RULE = ".cursorrules"
 
 # 手动指定的安装目录（自动探测找不到时，让用户点选并记下来）
 MANUAL_PATH_FILE = os.path.join(STATE_DIR, "手动指定目录.json")
+# 自动探测命中的安装根（进程反查 / 快捷方式 / 遍历）。
+# 存在的理由：这几条通道里有两条只在「客户端正开着」时才有效（进程），
+# 于是出现过同一台机器 --status 报 0 套、--apply 报 1 套 —— 用户以为检测坏了。
+# 破甲时命中就记一笔，之后检测直接复用，两边口径一致。
+# 只在写盘路径（--apply / --pick）落盘；--status 仍然一个字节都不写。
+FOUND_PATH_FILE = os.path.join(STATE_DIR, "发现目录.json")
 
 # ---- 内置人格 / 称呼 -------------------------------------------------------
 # 上游这里是「你是小码酱」（dsh-purge 的人格名），但该常量从未被引用 ——
@@ -1426,6 +1432,40 @@ def clear_manual_path(kind=""):
                 os.remove(MANUAL_PATH_FILE)
         except Exception:
             pass
+
+
+def load_found_paths():
+    try:
+        return json.loads(read_text(FOUND_PATH_FILE)[0])
+    except Exception:
+        return {}
+
+
+def get_found_path(kind):
+    """上次自动探测命中的安装根；目录没了就当没缓存。"""
+    rec = (load_found_paths() or {}).get(kind) or {}
+    p = rec.get("path") or ""
+    return p if (p and os.path.isdir(p)) else ""
+
+
+def save_found_path(kind, path, src=""):
+    """记下自动探测命中的安装根。只在写盘路径调用，--status 不落盘。"""
+    if not path or not os.path.isdir(path):
+        return
+    d = load_found_paths()
+    d[kind] = {"path": os.path.normpath(path), "src": src or "", "time": _dt_now_iso()}
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        write_text(FOUND_PATH_FILE, json.dumps(d, ensure_ascii=False, indent=2) + "\n")
+    except Exception:
+        pass
+
+
+def remember_found(kind, path, src=""):
+    """探测命中时记一笔。只读 / 预演一律不写 —— 那两个入口自述"不改盘"。"""
+    if DRY_RUN or READONLY:
+        return
+    save_found_path(kind, path, src)
 
 
 def _ps_quote(s):
@@ -3583,6 +3623,8 @@ class DshTarget:
     # 只有 --apply 会把它置 True。发现阶段的自动解包会让还原失效：
     # 删掉的 resources/app/ 会被下一次 --status 原样解回来。
     _unpack_ok = False
+    # find_bases() 每轮重置；只读探测记下「插件只存在于 app.asar 内」的安装根。
+    asar_only = ()
 
     # 四源发现的来源标注（--status 显示，定位错了能立刻看出是哪一层判断的）
     found_by = ""
@@ -3638,7 +3680,8 @@ class DshTarget:
                     "（目录里应该有 DSH Desktop.exe），或者直接选到 node_modules\\@deepseek-ai 那一层。")
 
     def detect_ok(self, args):
-        return bool(self.find_bases(getattr(args, "dsh_dir", "") or ""))
+        return bool(self.find_bases(getattr(args, "dsh_dir", "") or "")) \
+            or bool(self.asar_only)
 
     def ask_pick(self, args):
         return do_ask_pick(self, args)
@@ -3846,10 +3889,40 @@ class DshTarget:
         解包要往安装目录写一百多 MB，而 --status / --check / --dry-run 都自述
         "不改盘"。旧行为是发现阶段顺手就解，于是：revert 刚删掉的 resources/app/，
         跑一次 --status 又原样长回来 —— 用户看到的"还原不彻底"正是这个。
+
+        不解包 ≠ 装作没装：只读探测会把「插件在 app.asar 内」的安装记进 asar_only，
+        让 --status 和 --apply 对同一台机器给出同一个数量。
         """
-        if not getattr(self, "allow_unpack", False):
+        if not getattr(self, "_unpack_ok", False):
+            self._note_asar_only(res_root)
             return ""
         return self.asar_extract_agent_dir(res_root)
+
+    def _note_asar_only(self, res_root):
+        """只读：app.asar 头里有桌面端插件就记一笔（不解包、不写盘）。
+
+        只记「还没被别的方式覆盖」的那种：已经解包到 resources/app/、或者
+        app.asar.unpacked/ 里有包的，find_bases() 本来就能收到可改目录，
+        再记一次会让 --status 数出来的套数比实际多。
+        """
+        if self._find_ai_under(os.path.join(res_root, "app")):
+            return
+        for sub in ("app.asar.unpacked/node_modules/@deepseek-ai",
+                    "app.asar.unpacked/dsh/node_modules/@deepseek-ai"):
+            if os.path.isdir(os.path.join(res_root, *sub.split("/"))):
+                return
+        asar = os.path.join(res_root, "app.asar")
+        if not os.path.isfile(asar):
+            return
+        try:
+            files, _base = self._asar_read_tree(asar)
+        except Exception:
+            return
+        if not self._asar_has_agent(files):
+            return
+        root = os.path.dirname(os.path.normpath(res_root))
+        if root and root not in self.asar_only:
+            self.asar_only.append(root)
 
     # ---- Electron 保险丝（fuse）----
     # 官方 fuse wire 格式：32 字节 sentinel + version(1) + length(1) + 每个熔丝 1 字节，
@@ -3966,6 +4039,10 @@ class DshTarget:
     def find_bases(self, explicit=""):
         roots, seen = [], set()
         self.found_by, self.found_base = "", ""
+        # 本机「插件只存在于 app.asar 里、还没解包」的安装根。只读探测不解包，
+        # 但必须把它们记下来 —— 否则 --status 报 0 套、--apply 解包后报 1 套，
+        # 同一台机器两种说法（用户实测踩到：另一台机器 status 0 / apply 1）。
+        self.asar_only = []
 
         def add(p):
             p = os.path.normpath(p) if p else ""
@@ -3984,6 +4061,16 @@ class DshTarget:
         manual = get_manual_path(self.key)
         if manual and self._looks_like_ai_dir(manual):
             return [manual]
+
+        # 0.5) 上次自动探测命中的安装根。进程反查只有客户端开着时才有效 ——
+        #      检测时它没开，就会报 0 套，而破甲时（客户端在跑）报 1 套。
+        #      复用上次命中，两边口径才一样。
+        _last = get_found_path(self.key)
+        if _last and self._looks_like_app_root(_last):
+            self.found_by, self.found_base = "上次发现", _last
+            self._absorb_app_root(add, _last)
+            if roots:
+                return roots
 
         home = os.path.expanduser("~")
         # 1) DSH_HOME
@@ -4067,6 +4154,17 @@ class DshTarget:
             if app:
                 self.found_by, self.found_base = src, app
                 self._absorb_app_root(add, app)
+                self._remember(app, src)
+
+        # 2d) 盘符根目录按名字嗅探：自定义一级目录（D:\DSH Desktop、E:\Tools）用固定名
+        #     猜不到，但一级目录通常只有几十个，扫一遍几乎不花时间 —— 比最后那层
+        #     有界遍历便宜两个数量级，命中率却高得多。
+        if not roots:
+            app = self._sniff_drive_roots()
+            if app:
+                self.found_by, self.found_base = "盘符根目录", app
+                self._absorb_app_root(add, app)
+                self._remember(app, "盘符根目录")
 
         # 3) npm 全局
         # **只有前面一无所获时**才去 spawn npm。两个好处：
@@ -4105,7 +4203,34 @@ class DshTarget:
             if app:
                 self.found_by, self.found_base = "目录遍历", app
                 self._absorb_app_root(add, app)
+                self._remember(app, "目录遍历")
         return roots
+
+    def _remember(self, app, src):
+        """把自动探测命中的安装根记下来 —— 只在写盘路径生效（见 remember_found）。"""
+        remember_found(self.key, app, src)
+
+    def _sniff_drive_roots(self):
+        """扫每个盘符的一级目录，按名字认 DSH 安装根。只 listdir，不递归。"""
+        for letter in string.ascii_uppercase:
+            root = letter + ":\\"
+            if not os.path.isdir(root):
+                continue
+            try:
+                entries = list(os.scandir(root))
+            except OSError:
+                continue
+            for e in entries:
+                try:
+                    if not e.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                low = e.name.lower()
+                if ("dsh" in low or "deepseek" in low or "harness" in low) \
+                        and self._looks_like_app_root(e.path):
+                    return e.path
+        return ""
 
     def _absorb_app_root(self, add, app):
         """把一个 DSH 桌面端安装根解析成 @deepseek-ai 目录（含 asar 解包后的插件）。"""
@@ -4502,6 +4627,13 @@ class DshTarget:
         rows = []
         bases = self.find_bases(getattr(args, "dsh_dir", "") or "")
         if not bases:
+            if self.asar_only:
+                # 只读不解包，但「装了几套」必须和 --apply 说成同一个数。
+                rows.append(("warn", "检测到 %d 套 DSH 桌面端安装：插件打包在 app.asar 内，尚未解包"
+                             % len(self.asar_only), "、".join(self.asar_only[:2])))
+                rows.append(("info", "解包后才有靶点可改：--apply 会自动解到 resources/app/；"
+                                     "整目录删掉即回滚，app.asar 本体不动", ""))
+                return rows
             rows.append(("warn", "没探测到 @deepseek-ai 安装", "装了就用 --pick dsh 手动指定"))
             return rows
         user, _src = load_user_persona(getattr(args, "persona", "") or "")
@@ -4517,6 +4649,11 @@ class DshTarget:
         n_bad = sum(v for k2, v in counts.items()
                     if k2 not in ("loose", "clean", "manual"))
         rows.append(("info", "安装 %d 套（%s）" % (len(bases), self.classify_install(bases[0])), ""))
+        if self.asar_only:
+            # 已解包的那套和「插件还在 app.asar 里」的那套同时存在时也要说清楚，
+            # 否则用户数出来的套数比 --apply 少。
+            rows.append(("info", "另有 %d 套的插件在 app.asar 内（未解包，--apply 会解包后处理）"
+                         % len(self.asar_only), "、".join(self.asar_only[:2])))
         detail = "、".join("%s %d" % (k2, v) for k2, v in sorted(counts.items()))
         _tail = (" / %d 需手动（!!js 动态身份）" % n_man) if n_man else ""
         if n_bad == 0:
@@ -4574,7 +4711,12 @@ class DshTarget:
 
     def dump(self, args, action):
         bases = self.find_bases(getattr(args, "dsh_dir", "") or "")
-        log("检测到 %d 个 @deepseek-ai 安装" % len(bases), "c", "dsh")
+        # 数量必须和 --apply 对得上：只读探测不解包，但「插件在 app.asar 里」的那套
+        # 也算一套安装（apply 解包后就会变成可改的 base）。
+        log("检测到 %d 个 @deepseek-ai 安装" % (len(bases) + len(self.asar_only)), "c", "dsh")
+        for _r in self.asar_only:
+            log("· %s  [桌面端 · 插件在 app.asar 内，未解包]  目标待解包%s"
+                % (_r, "（预演不解包，--apply 才动手）" if action == "status" else ""), "dg", "dsh")
         user, _src = load_user_persona(getattr(args, "persona", "") or "")
         _pol, want = build_policy(user)
         rows = []
@@ -4630,6 +4772,15 @@ class DshTarget:
         DshTarget._unpack_ok = (mode == "apply")
         bases = self.find_bases(getattr(args, "dsh_dir", "") or "")
         if not bases:
+            if self.asar_only:
+                # 预演不解包（解包要写一百多 MB，预演承诺不改盘），但装了就得说出来，
+                # 不能和 --status 一个说「有」一个说「没有」。
+                log("检测到 %d 套 DSH 桌面端安装：插件在 app.asar 内，预演不解包，未改动任何文件。"
+                    % len(self.asar_only), "y", "dsh")
+                for _r in self.asar_only[:3]:
+                    log("  " + _r, "dg", "dsh")
+                log("  真跑 --apply 会自动解包到 resources/app/ 再处理。", "dg", "dsh")
+                return {"skip": True}
             log("未检测到 @deepseek-ai 安装，跳过。（可用 --dsh-dir 指定）", "y", "dsh")
             return {"skip": True}
 
@@ -5660,6 +5811,13 @@ class WorkBuddyTarget:
             self.found_by = "手动指定"
             return manual
 
+        # 0.2) 上次自动探测命中的安装根（国内版）。进程反查只在客户端开着时有效，
+        #      检测时它没开就会漏一套 —— 复用上次命中，status 与 apply 才同口径。
+        _last = get_found_path(self.key)
+        if ok_dom(_last):
+            self.found_by = "上次发现"
+            return _last
+
         # 0.5) 切换工具配置反查：wb-switch / cc-switch 记着每个版本的真实安装路径，
         #      对「自定义盘符 + 自定义一级目录」的机器，这是最快也最准的一层。
         hit = find_install_via_switch("WorkBuddy.exe", ok_dom)
@@ -6313,6 +6471,9 @@ class WorkBuddyTarget:
     # ---------------- 执行 ----------------
     def apply(self, args, mode):
         install = self.resolve_install_dir(getattr(args, self.install_attr, "") or "")
+        # 写盘路径才记（预演/只读由 remember_found 自己挡掉）：下次 --status
+        # 即使客户端没开着，也能复用这次自动探测到的安装根。
+        remember_found(self.key, install, self.found_by)
         data_dir = self.resolve_data_dir(getattr(args, self.data_attr, "") or "")
         user, src = load_user_persona(getattr(args, "persona", "") or "")
         policy, want = build_policy(user)
@@ -7696,6 +7857,12 @@ class WorkBuddyGlobalTarget(WorkBuddyTarget):
             self.found_by = "手动指定"
             return manual
 
+        # 0.2) 上次自动探测命中的安装根（国际版）。同上：进程通道依赖客户端在跑。
+        _last = get_found_path(self.key)
+        if ok(_last):
+            self.found_by = "上次发现"
+            return _last
+
         # 1) 进程反查（优先）：国际版正在运行时按 WorkBuddyAI.exe 命令行反查安装根。
         #    正则只认 \WorkBuddyAI.exe 结尾 —— 国内版进程 WorkBuddy.exe 不会误命中，
         #    反之国内版目标的老正则也认不出国际版，两边天然互斥。
@@ -7861,9 +8028,21 @@ class ZCodeTarget:
                 return cand
         return find_zcode_cjs(getattr(args, "zcode_dir", "") or "")
 
+    def locate(self, args):
+        """配置目录 + 系统提示词文件（zcode.cjs）。返回 (home, cjs)。
+
+        侦察与破甲共用这一份判断：以前 detect_ok / check 把「找到 zcode.cjs」算作
+        已安装，apply 却只认配置目录，于是检测说「检测到了」、破甲说「未检测到」。
+        """
+        return (self.resolve_home(getattr(args, "zcode_dir", "") or ""),
+                self.cjs_path(args))
+
+    def detected(self, args):
+        home, cjs = self.locate(args)
+        return os.path.isdir(home) or bool(cjs)
+
     def detect_ok(self, args):
-        h = self.resolve_home(getattr(args, "zcode_dir", "") or "")
-        return os.path.isdir(h) or bool(find_zcode_cjs(getattr(args, "zcode_dir", "") or ""))
+        return self.detected(args)
 
     def ask_pick(self, args):
         return do_ask_pick(self, args)
@@ -8027,7 +8206,7 @@ class ZCodeTarget:
 
     # ---------------- 执行 ----------------
     def apply(self, args, mode):
-        home = self.resolve_home(getattr(args, "zcode_dir", "") or "")
+        home, cjs_hit = self.locate(args)
         user, src_note = load_user_persona(getattr(args, "persona", "") or "")
         _pol, want = build_policy(user)
         persona = build_persona_text(user, "ZCode")
@@ -8037,12 +8216,18 @@ class ZCodeTarget:
         if mode == "revert":
             return self.revert(args)
 
-        if not os.path.isdir(home) and not zpatch:
+        if not os.path.isdir(home) and not (zpatch and cjs_hit):
             # 这里原来返回 {"err": 1}，于是"机器上没装 ZCode"会被算成错误 →
             # 进程退出码 1。路人第一次跑 --dry-run/--apply 就会看到"失败"，其实只是没装。
             # 与 DSH（未检测到安装 → skip）保持一致：**没装 = 跳过，不是错误**。
-            log("未检测到 ZCode 安装，跳过。（装了就用 --pick zcode 指定，或用 --zcode-dir）",
-                "y", "zcode")
+            if cjs_hit:
+                # 和 --status 同口径：cjs 在、配置目录没生成，不能一句「未检测到」打发。
+                log("检测到 ZCode 的系统提示词 %s，但配置目录 %s 还不存在："
+                    "启动一次 ZCode 生成配置目录，再重跑即可（加 --zpatch 可只改系统提示词）。"
+                    % (cjs_hit, home), "y", "zcode")
+            else:
+                log("未检测到 ZCode 安装，跳过。（装了就用 --pick zcode 指定，或用 --zcode-dir）",
+                    "y", "zcode")
             return {"skip": 1}
 
         cfg_agents = os.path.join(home, ZCODE_AGENTS)
@@ -8062,9 +8247,10 @@ class ZCodeTarget:
         log("ZCode 配置目录：%s" % home, "", "zcode")
 
         # 2) 系统提示词（可选通道，默认关）
-        cjs = ""
+        # cjs 在 locate() 里已经探过一次，这里直接复用 —— 再调一遍 cjs_path() 等于
+        # 让同一台机器在「检测」和「破甲」里各扫一次盘，结果还可能不一样。
+        cjs = cjs_hit if zpatch else ""
         if zpatch:
-            cjs = self.cjs_path(args)
             if not cjs:
                 log("  [!] --zpatch 已开，但没找到 resources/glm/zcode.cjs；跳过系统提示词 patch。", "y", "zcode")
                 log("      自定义安装路径可以用 --zcode-cjs 直接指定那个文件。", "dg", "zcode")
@@ -8247,8 +8433,7 @@ class ZCodeTarget:
     # ---------------- 体检 ----------------
     def check(self, args):
         rows = []
-        home = self.resolve_home(getattr(args, "zcode_dir", "") or "")
-        cjs = self.cjs_path(args)
+        home, cjs = self.locate(args)
         if not os.path.isdir(home) and not cjs:
             rows.append(("warn", "没检测到 ZCode（配置目录 %s 与 zcode.cjs 都不存在）" % home,
                          "装了 ZCode 就 --pick zcode 指定一次"))
@@ -8333,6 +8518,9 @@ class _MarkBlockTarget:
     # 纯 Markdown 指令文件（AGENTS.md / CLAUDE.md）可以；config.toml 这种
     # 结构化配置不可以（删了客户端起不来）。
     allow_delete_when_empty = True
+    # 配置目录不存在、需要反查安装根时给有界遍历的时间预算（秒）。
+    # 六个带 app_exe 的目标最坏各走一次；结果缓存 180 秒，重复跑不再实扫。
+    app_probe_budget = 3.0
 
     # ---------------- 定位 ----------------
     def resolve_home(self, explicit=""):
@@ -8354,9 +8542,30 @@ class _MarkBlockTarget:
     def prompt_path(self, home):
         return os.path.join(home, self.prompt_file)
 
+    def locate(self, args):
+        """配置目录 +（缺失时）用同一套四源链反查安装根。返回 (home, root, src)。
+
+        侦察（--status / --diagnose）和破甲（--apply）都调这里。以前 check() 自己
+        写了一份 walk=False 的探针、破甲侧完全不探，于是两边对同一台机器说法不一：
+        侦察能找到「装在 X」，破甲只丢一句「未检测到」就跳过。
+        """
+        home = self.resolve_home(getattr(args, self.arg_name, "") or "")
+        root, src = "", ""
+        exes = getattr(self, "app_exe", ())
+        if exes and not os.path.isdir(home):
+            # 与桌面端目标（DSH / WorkBuddy / ZCode）同一条链：进程 → 切换工具配置 →
+            # 快捷方式 → 有界遍历。结果按 exe 名缓存 180 秒，--status 不会逐个实扫。
+            # 预算写死在这里而不是各调用点传：--status 和 --apply 必须用同一组参数，
+            # 否则又会出现"检测没扫到、破甲扫到了"。
+            root, src = discover_app_root(
+                exes, lambda d: bool(d) and any(
+                    os.path.isfile(os.path.join(d, e)) for e in exes),
+                budget=self.app_probe_budget)
+        return home, root, src
+
     def detect_ok(self, args):
-        h = self.resolve_home(getattr(args, self.arg_name, "") or "")
-        return os.path.isdir(h)
+        home, _root, _src = self.locate(args)
+        return os.path.isdir(home)
 
     def ask_pick(self, args):
         return do_ask_pick(self, args)
@@ -8424,7 +8633,7 @@ class _MarkBlockTarget:
 
     # ---------------- 执行 ----------------
     def apply(self, args, mode):
-        home = self.resolve_home(getattr(args, self.arg_name, "") or "")
+        home, app_root, app_src = self.locate(args)
         user, _src = load_user_persona(getattr(args, "persona", "") or "")
         _pol, _want = build_policy(user)
         persona = build_persona_text(user, self.label, self.key)
@@ -8443,6 +8652,11 @@ class _MarkBlockTarget:
             _env = ("，或设环境变量 " + " / ".join(self.env_vars)) if self.env_vars else ""
             log("未检测到 %s 安装，跳过。（装了就用 %s 指定目录%s）"
                 % (self.label, " 或 ".join(_how), _env), "y", self.key)
+            if app_root:
+                # 和 --status 说同一句话：装在哪、下一步该干嘛。以前这里只丢「没检测到」，
+                # 而侦察那边已经知道安装根 —— 同一台机器两种说法，用户只能猜。
+                log("  安装目录在 %s（← %s）：启动一次 %s 让它生成配置目录，再重跑即可。"
+                    % (app_root, app_src, self.label), "dg", self.key)
             return {"skip": 1}
 
         target = self.prompt_path(home)
@@ -8582,20 +8796,13 @@ class _MarkBlockTarget:
 
     def check(self, args):
         rows = []
-        home = self.resolve_home(getattr(args, self.arg_name, "") or "")
+        home, app_root, app_src = self.locate(args)
         if not os.path.isdir(home):
             note = ""
-            exes = getattr(self, "app_exe", ())
-            if exes:
+            if app_root:
                 # 「没检测到」有两种：真没装，和装了但还没生成配置目录。
-                # 只走三个廉价通道（不实扫），有命中就把话说清楚，省得用户以为装坏了。
-                root, src = discover_app_root(
-                    exes, lambda d: bool(d) and any(
-                        os.path.isfile(os.path.join(d, e)) for e in exes),
-                    walk=False)
-                if root:
-                    note = ("但安装目录在 %s（← %s）：启动一次 %s 让它生成配置目录，再重跑即可"
-                            % (root, src, self.label))
+                note = ("但安装目录在 %s（← %s）：启动一次 %s 让它生成配置目录，再重跑即可"
+                        % (app_root, app_src, self.label))
             return [("warn", "没检测到 %s（配置目录 %s 不存在）" % (self.label, home), note)]
         rows.append(("info", "配置目录 : %s" % home, ""))
         target = self.prompt_path(home)
