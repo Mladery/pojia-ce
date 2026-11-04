@@ -26,9 +26,9 @@ def _lf(text):
     return text.replace("\r\n", "\n")
 
 
-def test_addendum_only_for_codex_and_claude(core):
+def test_addendum_only_for_tool_targets(core):
     base = core.build_persona_text("", "X")
-    for key in ("codex", "claude"):
+    for key in ("codex", "claude", "zcode"):
         assert core.CODING_AGENT_ADDENDUM in _lf(core.build_persona_text("", "X", key))
     assert core.CLAUDE_ADDENDUM in _lf(core.build_persona_text("", "X", "claude"))
     assert core.CLAUDE_ADDENDUM not in _lf(core.build_persona_text("", "X", "codex"))
