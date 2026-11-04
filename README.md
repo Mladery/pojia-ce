@@ -1,6 +1,6 @@
 # 破甲一键通 · 社区版
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.58-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.59-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。MIT，**非官方**，与原作者无隶属关系。
 > 仅限在**自己有权管理的本机设备**上使用，下载前请读 [完整免责声明](docs/免责声明.md)。
 
@@ -99,7 +99,7 @@ python src/破甲GUI.py                         # 图形界面（本机网页）
 在客户端**新会话**里单独发一句 `破甲自检`，只回这一行就说明人格真载入了：
 
 ```
-破甲自检成功 | 社区版v8.58 | 仓库地址：https://github.com/Mladery/pojia-ce
+破甲自检成功 | 社区版v8.59 | 仓库地址：https://github.com/Mladery/pojia-ce
 ```
 
 回复带解释、加戏或拒答 → 人格没生效，先确认目标已**重启**（改的是磁盘文件，运行中的进程不会重读）。
@@ -134,6 +134,7 @@ CI 每次推 `main` 都打一遍，打 tag 时自动发 Release：
 
 | 版本 | 主题 |
 |---|---|
+| [`v8.59-CE`](CHANGELOG.md#v859-ce-2026-11-04) | 检测状态与破甲共用同一套定位：进程命中会被记住、盘符根目录按名字嗅探 |
 | [`v8.58-CE`](CHANGELOG.md#v858-ce-2026-11-03) | 边界收紧到两条 / Codex·Claude 专用段 / Claude 走 output style |
 | [`v8.57-CE`](CHANGELOG.md#v857-ce-2026-11-03) | 草稿层清理 / 换任务类型 / Codex 重复键修复 |
 | [`v8.56-CE`](CHANGELOG.md#v856-ce-2026-11-03) | 首 token 拦截 / 软着陆八形态 / 内置人格真生效 / 静态清零 |
@@ -250,7 +251,7 @@ python 破甲一键通.py --persona-set ""           # 清空，回到 persona.m
 ## 校验
 
 ```
-cbf3f6ca0625c62dd4d696175231b7679c6274e49b6b4bcd1ca2cfd62bae0c7b  src/破甲一键通.py           (522,066 B / LF)
+9b1ad9126fd350427b53678d3f5600501749c49f33ba5bac5049136d239fc2d9  src/破甲一键通.py           (533,209 B / LF)
 4ff11a57d9d349d47b78e3237b276fa0b763bbd1ad547d15f119892e906fe62c  src/破甲GUI.py              (46,610 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
