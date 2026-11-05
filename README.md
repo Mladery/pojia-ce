@@ -262,7 +262,7 @@ python 破甲一键通.py --persona-set ""           # 清空，回到 persona.m
 ## 校验
 
 ```
-7bfdb21bccb99178f5177a1a30b7a563fa47e72dfe43e0a84b204f19994ee692  src/破甲一键通.py           (571,185 B / LF)
+ec64c5e75b52c7f04362ef2c9372c97d7ad6ee6a323798c83d4225b907c791d9  src/破甲一键通.py           (571,623 B / LF)
 7b0ec3e600c5f40529b87213c6cfc663843f30817169cded57a9c52c57b9729f  src/破甲GUI.py              (46,616 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
