@@ -177,6 +177,8 @@ def main():
     ap.add_argument("--no-cython", action="store_true", help="跳过 Cython，纯源码打包")
     ap.add_argument("--keep-cython-src", action="store_true",
                     help="保留中间产物（.py / .c），排查编译问题时用")
+    ap.add_argument("--onedir", action="store_true",
+                    help="打成目录而不是单文件：启动时不解包，不碰临时目录")
     args = ap.parse_args()
 
     for p in (CORE, GUI):
@@ -221,7 +223,8 @@ def main():
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--onefile", "--clean", "--noconfirm",
+        "--clean", "--noconfirm",
+        "--onedir" if args.onedir else "--onefile",
         "--name", args.name,
         "--distpath", dist,
         "--workpath", work,
@@ -246,6 +249,19 @@ def main():
     if r.returncode != 0:
         log("PyInstaller 失败，退出码 %d" % r.returncode)
         return r.returncode
+
+    if args.onedir:
+        # 目录形态：exe 旁边就是 _internal/，启动时直接加载，不解包也不写临时目录。
+        out_dir = os.path.join(dist, args.name)
+        exe = os.path.join(out_dir, args.name + (".exe" if os.name == "nt" else ""))
+        if not os.path.isfile(exe):
+            log("没找到产物：%s" % exe)
+            return 1
+        total = sum(os.path.getsize(os.path.join(d, f))
+                    for d, _, fs in os.walk(out_dir) for f in fs)
+        log("OK  %s/  %.1f MB（目录）cython=%s" % (out_dir, total / 1048576.0,
+                                                   "yes" if use_cython else "no"))
+        return 0
 
     out = os.path.join(dist, args.name + (".exe" if os.name == "nt" else ""))
     if not os.path.isfile(out):

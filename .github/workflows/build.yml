@@ -195,12 +195,108 @@ jobs:
             gh release edit "$TAG" --notes-file "$NOTES"
           fi
 
+  # 目录形态的 Windows 产物。单文件版每次启动都要把自身解包到 %TEMP% 下的
+  # _MEIxxxxxx 再运行；有些机器的安全软件不放行在临时目录里创建可执行文件，
+  # 启动即报 "Could not create temporary directory!"。目录版把依赖放在 exe
+  # 旁边的 _internal/，启动时直接加载，一步都不碰临时目录。
+  windows-onedir:
+    name: windows-x64-onedir
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装打包工具
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller==${{ env.PYINSTALLER_VERSION }}"
+          python -m pip install "cython==${{ env.CYTHON_VERSION }}" || echo "::warning::Cython 装不上，本次产物走纯源码打包"
+
+      - name: 打包（目录形态）
+        shell: bash
+        run: |
+          mkdir -p build/dist-onedir build/work-onedir build/spec-onedir
+          python tools/build_exe.py --name "$BIN_NAME" --onedir \
+            --dist build/dist-onedir \
+            --work build/work-onedir \
+            --spec build/spec-onedir
+
+      - name: 冒烟：产物能跑、版本号对
+        shell: python
+        run: |
+          import os, subprocess, sys
+          try:
+              sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          except Exception:
+              pass
+          exe = os.path.join("build", "dist-onedir", "pojia-ce", "pojia-ce.exe")
+          assert os.path.isfile(exe), "没有产物：%s" % exe
+          r = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=180)
+          print("--version exit=%s stdout=%r" % (r.returncode, r.stdout.strip()))
+          assert r.returncode == 0, "--version failed: %r" % (r.stderr,)
+          assert "CE" in r.stdout
+          r2 = subprocess.run([exe, "--help"], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=180)
+          assert r2.returncode == 0, "--help failed: %r" % (r2.stderr,)
+          assert "kiro" in r2.stdout
+          print("smoke OK")
+
+      - name: 冒烟：图形界面能起来
+        shell: bash
+        run: python tools/gui_smoke.py "build/dist-onedir/pojia-ce/pojia-ce.exe"
+
+      - name: 压成 zip
+        shell: pwsh
+        run: |
+          # 整目录压成一个包：解压即用，_internal/ 和 exe 必须保持同级。
+          $src = "build/dist-onedir/pojia-ce"
+          $zip = "out/${{ env.BIN_NAME }}-windows-x64-onedir.zip"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Compress-Archive -Path "$src/*" -DestinationPath $zip -CompressionLevel Optimal
+          Get-Item $zip | Format-List Name,Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-windows-x64-onedir
+          path: out/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            NOTES="docs/release-notes/$TAG.md"
+            if [ -f "$NOTES" ]; then
+              gh release create "$TAG" --title "破甲一键通 ${TAG#v}" --notes-file "$NOTES" || true
+            else
+              gh release create "$TAG" --title "破甲一键通 ${TAG#v}" --generate-notes || true
+            fi
+          fi
+          gh release upload "$TAG" out/*.zip --clobber
+          gh release edit "$TAG" --draft=false || true
+
   # 四个平台的产物汇总成一份校验和。Windows 走签名验签，另外三个平台只有
   # SHA-256 这一条路 —— 所以这份文件是它们唯一的完整性凭据。
   checksums:
     name: checksums
-    needs: build
-    if: needs.build.result == 'success'
+    # 目录版也算发布产物，缺了它这份校验和就不全。
+    needs: [build, windows-onedir]
+    if: needs.build.result == 'success' && needs.windows-onedir.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
