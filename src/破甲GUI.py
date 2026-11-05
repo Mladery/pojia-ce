@@ -67,25 +67,42 @@ def _spawn_flags():
 
 
 def _frozen_version():
-    """冻结态读不到核心源码，就问自己一句：`exe --version` 打的就是版本号。
+    """冻结态读不到核心源码，先找打包时塞进来的版本号，问不到再问自己一句。
 
-    起自己的进程要解一次包（约一秒），所以结果缓存住 —— 一次界面会话只问一遍。
+    以前只走第二条。那条路会卡死：子进程继承终端 stdin，`--version` 退出前的留屏
+    逻辑在等回车，父进程 subprocess.run 干等，界面永远停在横幅第一行。版本号在
+    打包那一刻就是确定的，摊成一行文本塞进包里，不必为了显示它去起进程。
     """
     if _VER_CACHE:
         return _VER_CACHE[0]
-    ver = "?"
-    try:
-        r = subprocess.run(
-            [sys.executable, "--version"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=180, creationflags=_spawn_flags(),
-        )
-        txt = (r.stdout or b"").decode("utf-8", "replace")
-        m = re.search(r"(\d+\.\d+(?:-[A-Za-z0-9.]+)?)", txt)
-        if m:
-            ver = m.group(1)
-    except Exception:              # 版本号是显示用的，问不到就显示 ?，别把界面拖崩
-        pass
+    ver = ""
+    cands = [os.path.join(HERE, "_version.txt")]
+    _mp = getattr(sys, "_MEIPASS", "") or ""
+    if _mp:                            # 空值会拼出相对路径，等于去 CWD 里乱找
+        cands.insert(0, os.path.join(_mp, "_version.txt"))
+    for path in cands:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                ver = f.read().strip().splitlines()[0].strip()
+        except (OSError, IndexError):
+            continue
+        if ver:
+            break
+    if not ver:
+        ver = "?"
+        try:
+            r = subprocess.run(
+                [sys.executable, "--version"],
+                stdin=subprocess.DEVNULL,       # 绝不把终端交给子进程，见上
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=180, creationflags=_spawn_flags(),
+            )
+            txt = (r.stdout or b"").decode("utf-8", "replace")
+            m = re.search(r"(\d+\.\d+(?:-[A-Za-z0-9.]+)?)", txt)
+            if m:
+                ver = m.group(1)
+        except Exception:          # 版本号是显示用的，问不到就显示 ?，别把界面拖崩
+            pass
     _VER_CACHE.append(ver)
     return ver
 

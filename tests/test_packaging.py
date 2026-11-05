@@ -172,7 +172,12 @@ def test_modal_panel_class_is_namespaced(gui):
 
 
 def test_core_version_frozen_asks_self(gui, monkeypatch):
-    """冻结态读不到源码，改问 `exe --version`。"""
+    """冻结态读不到源码：先找包里的版本号文件，没有再问 `exe --version`。
+
+    兜底那条必须给子进程一个 DEVNULL 的 stdin。早先没给，子进程继承了终端的
+    stdin，`--version` 退出前的留屏逻辑在等回车，父进程卡在 subprocess.run 里，
+    界面停在横幅第一行 —— 浏览器也就一直没打开。
+    """
     monkeypatch.setattr(gui, "FROZEN", True)
     monkeypatch.setattr(gui, "_VER_CACHE", [])
     monkeypatch.setattr(gui, "sys", types.SimpleNamespace(executable="/opt/pojia-ce"))
@@ -183,12 +188,15 @@ def test_core_version_frozen_asks_self(gui, monkeypatch):
 
     def fake_run(cmd, **kw):
         seen["cmd"] = cmd
+        seen["kw"] = kw
         return R()
 
     monkeypatch.setattr(gui, "subprocess", types.SimpleNamespace(
-        run=fake_run, CREATE_NO_WINDOW=0, PIPE=-1, STDOUT=-2, SubprocessError=Exception))
+        run=fake_run, CREATE_NO_WINDOW=0, PIPE=-1, STDOUT=-2, DEVNULL=-3,
+        SubprocessError=Exception))
     assert gui.core_version() == "8.51-CE"
     assert seen["cmd"] == ["/opt/pojia-ce", "--version"]
+    assert seen["kw"].get("stdin") == -3, "子进程必须拿 DEVNULL，不能继承终端"
     # 第二次要命中缓存，不能再起进程
     assert gui.core_version() == "8.51-CE"
     assert seen["cmd"] == ["/opt/pojia-ce", "--version"]

@@ -71,13 +71,32 @@ DSH 0.2.2-rc.1 改了指令预算的算法；顺带把「装了却找不到」�
 
 新增 `--pause`：跑完停一下等回车（快捷方式里预置参数时用；`--quiet` 下无效）。参数层的 `--help` / `--version` / 报错在冻结态会自动停一次 —— 那时候控制台是本进程独占的，不停就什么都看不见。
 
-### 单文件版不再依赖 `%TEMP%`
+### 图形界面停在横幅第一行
+
+`--gui` 打出「已启动图形界面，浏览器会自动打开」和一条横线之后就没了。浏览器不开，页面也打不开 —— 端口其实已经 bind，连上去只会超时。进程挂着不动，关掉重来还是同一个位置。
+
+根因在版本号。界面冻结态读不到 `.py` 源码，为了在横幅上显示 `v8.62-CE`，会起一个 `exe --version` 子进程问自己。那个子进程继承了终端的 stdin，而 `--version` 退出前的留屏逻辑在等一次回车 —— 没人按，父进程就卡在 `subprocess.run` 里，HTTP 服务连 accept 循环都没进。
+
+两处一起改：
+
+- 打包时把版本号摊成 `_version.txt` 一并打进包（`--add-data`），界面直接读文件显示，一次进程都不起。
+- `_hold_screen` 的判据加一条：stdout 也必须是终端。stdout 被管道接走时提示根本没人看得见，再等回车就是死等；双击运行时 stdout 是终端，照停不误。
+
+### 单文件版解包目录挪出 `%TEMP%`
 
 单文件产物启动时要把自身解到临时目录再加载。这一段发生在 Python 起来之前，建目录失败就直接退出，屏幕上只留一行 `Could not create temporary directory!` —— 用户看到的是「双击没反应」，重下、重启都不管用，因为下一次还是同一个位置、同一条路。
 
-现在 Windows 单文件版固定解到 `%LOCALAPPDATA%\pojia-ce\rt`（`--runtime-tmpdir`）。bootloader 会把整条多级路径自己建出来，实测父目录不存在也补得上。把 `TEMP` / `TMP` 都指到不存在的盘再启动，产物照样跑 —— 这条依赖算彻底切掉了。
+现在 Windows 单文件版固定解到 `%LOCALAPPDATA%\pojia-ce\rt`（`--runtime-tmpdir`）。bootloader 会把整条多级路径自己建出来，实测父目录不存在也补得上；把 `TEMP` / `TMP` 都指到不存在的盘再启动，产物照样跑。
 
-目录版（`pojia-ce-windows-x64-onedir.zip`）本来就不解包，依赖放在 exe 旁边的 `_internal/`，不受影响；临时目录彻底不可用的机器仍然走这一份。
+**但那个报错最常见的来源不是 TEMP，是文件所在目录的完整性标签。** 本机实测：同一个 exe 放在 `I:\Downloads` 报错，复制到 `I:\` 根目录就能跑；两个目录的差别只有一处 —— Downloads 带着 `Low:(OI)(CI)(NW)`，继承给里面每个 exe。低完整性进程起不来自解压这类动作。
+
+```cmd
+icacls "I:\Downloads"                                      :: 看有没有 Low Mandatory Level
+icacls "I:\Downloads" /setintegritylevel (OI)(CI)Medium    :: 以后的新文件不再继承
+icacls "I:\Downloads\pojia-ce-windows-x64.exe" /setintegritylevel Medium   :: 老文件单独改
+```
+
+这条不只坑本工具：任何 PyInstaller 产物、任何自解压安装包丢进那个目录都一样。目录版（`pojia-ce-windows-x64-onedir.zip`）不解包，依赖在 exe 旁边的 `_internal/`，整条路径都绕开了。
 
 ---
 

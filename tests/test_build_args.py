@@ -49,3 +49,18 @@ def test_explicit_tmpdir_wins(be):
 def test_posix_keeps_bootloader_default(be):
     """POSIX 的 bootloader 不展开环境变量，塞 %VAR% 进去等于给它一条坏路径。"""
     assert be.runtime_tmpdir_for(_args(), nt=False) == ""
+
+
+def test_build_version_reads_core(be):
+    """版本号从核心脚本里读，形态是 8.62-CE。"""
+    v = be.build_version(be.CORE)
+    assert v and v[0].isdigit() and "-" in v
+
+
+def test_write_version_file_single_line(be, tmp_path):
+    """落盘必须是一行纯版本号 —— 界面读第一行就直接拿去显示。"""
+    dest = tmp_path / "nested" / "_version.txt"
+    p = be.write_version_file(be.CORE, str(dest))
+    assert p and os.path.isfile(p)
+    lines = open(p, encoding="utf-8").read().splitlines()
+    assert lines == [be.build_version(be.CORE)]

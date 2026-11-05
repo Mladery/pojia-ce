@@ -11044,9 +11044,14 @@ def _hold_screen():
 
     打包版双击运行时控制台是本进程独占的，程序一退窗口就关，提示等于没出现。
     从 cmd / bat 里跑时窗口还在，多按一次回车纯属打扰 —— 所以只在冻结态调用。
+
+    判据要连 stdout 一起看。图形界面冻结态会起一个 `exe --version` 子进程问版本
+    号，那个子进程继承了终端的 stdin，stdout 却被管道接走；只看 stdin 的话这里就
+    在等一个永远不会来的回车，父进程卡在 subprocess.run 里，界面停在横幅第一行。
     """
     try:
-        if sys.stdin and sys.stdin.isatty():
+        if (sys.stdin and sys.stdin.isatty()
+                and sys.stdout and sys.stdout.isatty()):
             input("\n按回车键退出…")
     except Exception:
         pass

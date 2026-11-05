@@ -27,6 +27,7 @@ import ast
 import glob
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -122,6 +123,38 @@ def hidden_imports(*sources):
             if importable(m):
                 seen.append(m)
     return seen
+
+
+def build_version(src):
+    """从核心脚本里读对外版本号：数字版 + 社区版后缀，例如 8.62-CE。"""
+    try:
+        with open(src, "r", encoding="utf-8", errors="ignore") as f:
+            txt = f.read()
+    except OSError:
+        return ""
+    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', txt, re.M)
+    if not m:
+        return ""
+    e = re.search(r'^EDITION\s*=\s*"([^"]+)"', txt, re.M)
+    return m.group(1) + ("-" + e.group(1) if e else "")
+
+
+def write_version_file(src, dest):
+    """把版本号摊成 `_version.txt` 一起打进包，返回路径；写不出来返回空串。
+
+    图形界面冻结态读不到 .py 源码，早先靠起一个 `exe --version` 子进程问自己。
+    那条路会卡死：子进程继承了终端 stdin，退出前的留屏逻辑在等一个没人按的
+    回车，父进程干等，界面停在横幅第一行。版本号打包时就确定了，没必要问。
+    """
+    ver = build_version(src)
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w", encoding="utf-8", newline="\n") as f:
+            f.write((ver or "?") + "\n")
+    except OSError as e:
+        log("写版本号文件失败（界面版本会显示 ?）：%s" % e)
+        return ""
+    return dest
 
 
 def runtime_tmpdir_for(args, nt=None):
@@ -254,6 +287,10 @@ def main():
         # GUI 是数据文件：核心用 runpy 在进程内跑它。漏了这条，产物就没有 --gui。
         "--add-data", GUI + os.pathsep + ".",
     ]
+    # 版本号也是一份数据文件，和 GUI 放同一层（解包后是 _MEIPASS/_version.txt）。
+    vfile = write_version_file(CORE, os.path.join(spec, "_version.txt"))
+    if vfile:
+        cmd += ["--add-data", vfile + os.pathsep + "."]
     for p in paths:
         cmd += ["--paths", p]
     if mod:
