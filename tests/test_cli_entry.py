@@ -8,6 +8,7 @@
   · 参数写错时只丢一行英文 `unrecognized arguments`，打包版双击的窗口一闪而过
   · 帮助里的示例把命令名写死成 `python 破甲一键通.py`，打包版用户以为要装 Python
 """
+import os
 import sys
 
 import pytest
@@ -78,13 +79,13 @@ def test_cmd_name_source_mode(core, monkeypatch):
 def test_cmd_name_frozen(core, monkeypatch):
     """打包版别再自称 `python xxx.py` —— 用户会以为得先装 Python。"""
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(core, "SELF", r"J:\dist\pojia-ce.exe")
+    monkeypatch.setattr(core, "SELF", os.path.join("dist", "pojia-ce.exe"))
     assert core._cmd_name() == "pojia-ce.exe"
 
 
 def test_epilog_uses_cmd_name(core, monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(core, "SELF", r"J:\dist\pojia-ce.exe")
+    monkeypatch.setattr(core, "SELF", os.path.join("dist", "pojia-ce.exe"))
     text = core._epilog()
     assert "pojia-ce.exe --menu" in text
     assert "python " not in text

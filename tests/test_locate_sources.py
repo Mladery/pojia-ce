@@ -19,10 +19,11 @@ def test_walk_up_to_root(core, tmp_path):
     assert core._walk_up_to_root(str(tmp_path / "nope"), judge) == ""
 
 
-def test_walk_up_stops_at_drive_root(core):
-    """一路走到盘符根还没命中就认输，不能把根目录当安装根返回。"""
-    assert core._walk_up_to_root("C:\\", lambda d: True) in ("C:\\", "C:/")
-    assert core._walk_up_to_root("C:\\", lambda d: False) == ""
+def test_walk_up_stops_at_fs_root(core):
+    """一路走到文件系统根还没命中就认输，不能把根目录当安装根返回。"""
+    root = os.path.abspath(os.sep)        # Windows 是 C:\，POSIX 是 /
+    assert core._walk_up_to_root(root, lambda d: True) == root
+    assert core._walk_up_to_root(root, lambda d: False) == ""
 
 
 def test_dir_of_install_value_forms(core, tmp_path):

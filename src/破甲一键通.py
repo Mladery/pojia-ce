@@ -5781,10 +5781,15 @@ def _proc_image_path(pid):
         except Exception:
             return ""
         return ""
+    # Linux 有 procfs，链接目标就是内核记的镜像路径；macOS 没有，这里返回 ""，
+    # 定位链自动退到命令行与快捷方式那两源。
     try:
-        return os.path.realpath("/proc/%d/exe" % int(pid))
-    except Exception:
+        target = os.readlink("/proc/%d/exe" % int(pid))
+    except OSError:                       # 进程不存在、或没权限读别人的链接
         return ""
+    if target.endswith(" (deleted)"):     # 启动后二进制被替换/删掉，内核会补这个后缀
+        target = target[:-len(" (deleted)")]
+    return target if os.path.isabs(target) else ""
 
 
 def find_install_via_process(exe_name, judge):
