@@ -227,7 +227,7 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess.Popen = _popen_no_window
     subprocess._dsh_no_window_patched = True
 
-VERSION = "8.61"
+VERSION = "8.62"
 # 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
 # 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
 # "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。
@@ -2213,6 +2213,51 @@ DSH_PROC_NAMES = ("DSH Desktop.exe", "dsh.exe", "dsh")
 DSH_CMD_HINTS = ("deepseek-harness", "@deepseek-ai/dsh", "dsh agent", "dsh web",
                  "deepseek-ai/dsh", "dsh-desktop")
 
+# 0.2.2-rc.1 唯一动到我们的地方：agent-instructions 把 maxBytes 从「全局 + 项目
+# 共用一份」改成「两条链各一份」（renderInstructionChains）。项目 AGENTS.md 再大
+# 也挤不掉全局那份，合计最多 2 × maxBytes。注入点（intro 常量名与文案、免责句、
+# 预设 schema、asar 内 dsh/node_modules 布局、agent/status 事件与 followup 签名）
+# 逐个核对过，全都没变 —— 所以这里只需要把预算口径报出来，不用改补丁逻辑。
+DSH_SPLIT_BUDGET_VER = (0, 2, 2)
+
+
+def _ver_tuple(s):
+    """'0.2.2-rc.1' -> (0, 2, 2)。解析不出来返回 ()。"""
+    m = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", str(s or ""))
+    return tuple(int(x) for x in m.groups()) if m else ()
+
+
+def dsh_version(base="", home="", prefer_runtime=False):
+    """当前装的是哪一版 DSH。返回版本串，认不出来返回 ""。
+
+    两条来源：① @deepseek-ai/dsh 的 package.json（npm / CLI / 已解包的桌面端都有）；
+    ② <DSH_HOME>/dsh-runtimes/dsh-primary-runtime/runtime.json 里的 desktopVersion
+    —— 桌面端 app.asar 没解包时包清单读不到，只有这份运行时清单还在。
+
+    桌面端和全局 npm 同时装着时两边的版本**可以不一样**（桌面端自带运行时）。
+    prefer_runtime 让桌面端优先报 runtime.json 那份，否则会拿 npm 的版本糊弄人。
+    """
+    def _read_json_version(path, key):
+        try:
+            if path and os.path.isfile(path):
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    v = json.load(f).get(key) or ""
+                if _ver_tuple(v):
+                    return str(v)
+        except Exception:
+            pass
+        return ""
+
+    pkg = os.path.join(base or "", "dsh", "package.json")
+    rt = os.path.join(home or "", "dsh-runtimes", "dsh-primary-runtime", "runtime.json")
+    order = (rt, pkg) if prefer_runtime else (pkg, rt)
+    keys = {pkg: "version", rt: "desktopVersion"}
+    for path in order:
+        v = _read_json_version(path, keys[path])
+        if v:
+            return v
+    return ""
+
 
 # ---------------------------------------------------------------------------
 # DSH 运行时守卫（Cordis 插件）
@@ -3736,14 +3781,14 @@ class DshTarget:
     # find_bases() 每轮重置；只读探测记下「插件只存在于 app.asar 内」的安装根。
     asar_only = ()
 
-    # 四源发现的来源标注（--status 显示，定位错了能立刻看出是哪一层判断的）
+    # 五源发现的来源标注（--status 显示，定位错了能立刻看出是哪一层判断的）
     found_by = ""
     found_base = ""
     DSH_EXE_NAMES = ("DSH Desktop.exe", "DeepSeek Harness.exe")
 
     @classmethod
     def _looks_like_app_root(cls, d):
-        """一个目录是不是 DSH 桌面端的安装根（给四源发现当判据用）。"""
+        """一个目录是不是 DSH 桌面端的安装根（给五源发现当判据用）。"""
         if not d or not os.path.isdir(d):
             return False
         for exe in cls.DSH_EXE_NAMES:
@@ -4254,7 +4299,7 @@ class DshTarget:
                     if ai:
                         add(ai)
 
-        # 2c) 四源发现·廉价三通道（v8.2-CE）：进程反查 / 切换工具配置 / 快捷方式
+        # 2c) 五源发现·廉价四通道：进程反查 / 切换工具配置 / 快捷方式 / 卸载登记表
         #     上面 2) 2b) 全是在「猜固定目录名」，用户把 DSH 装到 H:\DSH Desktop 这种
         #     自定义一级目录时一个都命中不了。这三层只读现成记录，很快；
         #     实扫盘的那一层放到最后兜底，免得 npm 装的用户白等几秒。
@@ -4407,7 +4452,7 @@ class DshTarget:
         """能定位到的桌面端安装根 —— 只读、**不解包**。
 
         破甲模式要用它：预设模板可能只在 app.asar 里，读 asar 只需要路径。
-        三个来源：已有靶点反推、还原戳记下的根、进程/快捷方式四源发现。
+        三个来源：已有靶点反推、还原戳记下的根、进程/快捷方式五源发现。
         """
         out, seen = [], set()
 
@@ -4460,6 +4505,9 @@ class DshTarget:
     # AGENT_INSTRUCTIONS_*，旧名单只认老名字 → 新版上 intro 注入**静默失效**：
     # apply 报告"已是最新"，实际一个字节都没写进去（本机 DSH 0.2.1-rc.5 实测）。
     # 老名字保留兼容旧版，新名字补上。
+    # 0.2.2-rc.1 核对：三个 AGENT_INSTRUCTIONS_* 常量名与文案都没动，名单继续有效。
+    # COMPACT_AGENT_INSTRUCTIONS_INTRO 故意**不**收 —— 它是"内容被预算裁掉了"时的
+    # 告示语（此时正文根本不在帧里），把它换成强权限版等于对着空壳喊"指令生效中"。
     INTRO_CONSTS = (
         "WORKSPACE_CONTEXT_INTRO",
         "REPLACEMENT_WORKSPACE_CONTEXT_INTRO",
@@ -4663,6 +4711,19 @@ class DshTarget:
                 for p in _g.glob(os.path.join(base_p, *pattern.split("/")), recursive=True):
                     if os.path.isfile(p):
                         add(p, js_funcs)
+            # 0.2.x 的预设是 dsh-web-app/presets/*.patch.yml，每份自带 persona.prefix。
+            # 预设跑在 agent scope 里，同名的 system-prompt 区段会**遮蔽**上一层的
+            # cordis.patch.yml —— 不打这里，用户选「标准 / PTC / 极简」时跑的还是官方
+            # 身份，全局那份补丁白打（0.2.2-rc.1 实测：顶层已打，presets 里三份原封不动）。
+            for pattern in ("dsh-web-app/presets/*.patch.yml",
+                            _NP + "dsh-web-app/presets/*.patch.yml",
+                            "*/presets/*.patch.yml",
+                            _NP + "*/presets/*.patch.yml"):
+                for p in _g.glob(os.path.join(base_p, *pattern.split("/"))):
+                    raw = read_text_safe(p) or ""
+                    if ("prefix:" in raw) or ("You are a coding agent" in raw) \
+                            or is_loose_text(raw):
+                        add(p, self._pick_persona_funcs(raw))
             for pattern in ("dsh-agent-presets/presets/*/agent.cordis.yml",
                             _NP + "dsh-agent-presets/presets/*/agent.cordis.yml"):
                 for p in _g.glob(os.path.join(base_p, *pattern.split("/")), recursive=True):
@@ -4721,9 +4782,8 @@ class DshTarget:
         else:
             intro = STRONG_INTRO in txt
             # 判"我们写过"只能用本工具自己的标记，**不能用 SCOPE_REPLACEMENT** ——
-            # 0.2.1-rc.5 起官方 intro 原文里就带
-            # "These instructions are ACTIVE and MANDATORY for the stated scope"，
-            # 于是任何一份没动过的官方文件都会被判成"部分已打"，满屏假警报。
+            # 那句话是**我们自己写进去的**替换文本，拿它当判据等于用结论证明结论：
+            # 文件只要被动过一次，之后任何状态都判成"改过"，"部分已打"永远报不出来。
             scope = _is_our_artifact(txt) \
                 or not any(s in txt for s in DISCLAIMER_SENTENCES)
             if intro and scope:
@@ -4732,10 +4792,32 @@ class DshTarget:
                 return "stale", "部分已打"
             return "strict", "仍是官方原版"
 
+    def version_row(self, bases=()):
+        """版本 + 指令预算口径。
+
+        0.2.2 起 agent-instructions 把 maxBytes 拆成「全局链 / 项目链」各一份，
+        这条口径直接决定用户看到的 AGENTS.md 会不会被截断，值得在状态里报一句。
+        """
+        bases = [b for b in (bases or ()) if b]
+        _desk = bool(self.asar_only) or any(
+            "/resources/" in b.lower().replace("\\", "/") for b in bases)
+        cur = bases[0] if bases else ""
+        ver = dsh_version(cur, self.dsh_home(), prefer_runtime=_desk)
+        if not ver:
+            return None
+        if _ver_tuple(ver) >= DSH_SPLIT_BUDGET_VER:
+            return ("info", "DSH %s：指令预算按「全局 / 项目」分链" % ver,
+                    "每链各一份额度（默认 65536 B），项目 AGENTS.md 再大也挤不掉全局那份")
+        return ("info", "DSH %s：指令预算单链（全局 + 项目共用）" % ver,
+                "全局 AGENTS.md 会被大的项目 AGENTS.md 挤掉（0.2.2 起改成分链）")
+
     # ---------------- 体检（--check 用，只读） ----------------
     def check(self, args):
         rows = []
         bases = self.find_bases(getattr(args, "dsh_dir", "") or "")
+        _vr = self.version_row(bases)
+        if _vr:
+            rows.append(_vr)
         if not bases:
             if self.asar_only:
                 # 只读不解包，但「装了几套」必须和 --apply 说成同一个数。
@@ -4824,6 +4906,11 @@ class DshTarget:
         # 数量必须和 --apply 对得上：只读探测不解包，但「插件在 app.asar 里」的那套
         # 也算一套安装（apply 解包后就会变成可改的 base）。
         log("检测到 %d 个 @deepseek-ai 安装" % (len(bases) + len(self.asar_only)), "c", "dsh")
+        _vr = self.version_row(bases)
+        if _vr:
+            log("· " + _vr[1], "", "dsh")
+            if getattr(args, "diagnose", False) and _vr[2]:
+                log("    " + _vr[2], "dg", "dsh")
         for _r in self.asar_only:
             log("· %s  [桌面端 · 插件在 app.asar 内，未解包]  目标待解包%s"
                 % (_r, "（预演不解包，--apply 才动手）" if action == "status" else ""), "dg", "dsh")
@@ -4843,6 +4930,11 @@ class DshTarget:
                     log("    [%-6s] %s  %s%s" % (st, os.path.basename(fp), note,
                                                  "  (有备份)" if has_bak else ""),
                         "g" if st in ("loose", "clean") else "y", "dsh")
+        # 没问题的不逐条列（默认只显示要处理的），但也得报个总数 ——
+        # 否则一屏只有"目标 11 个"和一行 manual，看着像什么都没做。
+        _ok = sum(1 for r in rows if r[0] in ("loose", "clean"))
+        if _ok and not getattr(args, "diagnose", False):
+            log("    （%d 个已是当前版，未逐条列出；加 --diagnose 展开）" % _ok, "dg", "dsh")
         # 还原过的安装根不会出现在 bases 里（app/ 都删了），但状态里不能装作没有 ——
         # 否则用户以为 DSH 凭空消失了。
         for _k, _rec in revert_stamp_load(self.dsh_home()).items():
@@ -5446,31 +5538,87 @@ def lnk_target(path):
     return ""
 
 
+def _known_folder(name, default=""):
+    """用户目录被搬走之后的真实位置（桌面 / 开始菜单……）。
+
+    不能直接拼 `~\\Desktop`：桌面可以被「右键 → 属性 → 位置」搬到别的盘，也能被
+    OneDrive 备份接管；搬完之后 `~\\Desktop` 要么不存在，要么是个早就没人用的空壳
+    （本机就是反例：C:\\Users\\X\\Desktop 还躺着几百个旧文件，真桌面在 I:\\Desktop）。
+    真实路径只有注册表知道 —— Explorer 每改一次设置就写回 User Shell Folders。
+
+    顺序：User Shell Folders（REG_EXPAND_SZ，可能含 %USERPROFILE%，要展开）
+        → Shell Folders（已展开的缓存，Explorer 没跑过时可能缺）
+        → default。
+    """
+    if not IS_WIN:
+        return default
+    subs = (r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders")
+    try:
+        import winreg
+    except Exception:
+        return default
+    for sub in subs:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub) as k:
+                v = winreg.QueryValueEx(k, name)[0]
+        except OSError:
+            continue
+        if not isinstance(v, str) or not v.strip():
+            continue
+        p = os.path.expandvars(v.strip())
+        if "%" in p:                      # 还有没展开的变量，别硬用
+            continue
+        if os.path.isdir(p):
+            return os.path.normpath(p)
+    return default
+
+
 def _lnk_candidates():
-    """开始菜单（用户 + 公共）与桌面（用户 + 公共）下的 .lnk 路径。"""
-    out = []
+    """开始菜单（用户 + 公共）与桌面（用户 + 公共）下的 .lnk 路径。
+
+    两个目录都可能被搬走（桌面改位置 / OneDrive 接管 / 漫游配置），所以一律先问
+    注册表要真实位置，`~\\Desktop` 只当兜底 —— 只扫 `~\\Desktop` 在改过路径的机器上
+    等于一个快捷方式都读不到，快捷方式这条线索直接失效。
+    """
+    out, seen = [], set()
+
+    def _scan_dir(desk):
+        if not desk:
+            return
+        key = os.path.normcase(os.path.normpath(desk))
+        if key in seen or not os.path.isdir(desk):
+            return
+        seen.add(key)
+        try:
+            names = os.listdir(desk)
+        except OSError:
+            return
+        for fn in names:
+            if fn.lower().endswith(".lnk"):
+                out.append(os.path.join(desk, fn))
+
+    menus = [_known_folder("Programs")]
     for base in (os.environ.get("APPDATA"), os.environ.get("ProgramData")):
-        if not base:
+        if base:
+            menus.append(os.path.join(base, "Microsoft", "Windows", "Start Menu", "Programs"))
+    for root in menus:
+        if not root or not os.path.isdir(root):
             continue
-        root = os.path.join(base, "Microsoft", "Windows", "Start Menu", "Programs")
-        if not os.path.isdir(root):
+        key = os.path.normcase(os.path.normpath(root))
+        if key in seen:
             continue
+        seen.add(key)
         for dirpath, dirnames, filenames in os.walk(root):
             if dirpath[len(root):].count(os.sep) >= 3:
                 dirnames[:] = []
             for fn in filenames:
                 if fn.lower().endswith(".lnk"):
                     out.append(os.path.join(dirpath, fn))
-    for desk in (os.path.join(os.path.expanduser("~"), "Desktop"),
+    for desk in (_known_folder("Desktop"),
+                 os.path.join(os.path.expanduser("~"), "Desktop"),
                  os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "Desktop")):
-        if not os.path.isdir(desk):
-            continue
-        try:
-            for fn in os.listdir(desk):
-                if fn.lower().endswith(".lnk"):
-                    out.append(os.path.join(desk, fn))
-        except OSError:
-            pass
+        _scan_dir(desk)
     return out
 
 
@@ -5593,25 +5741,169 @@ def find_install_by_walk(exe_name, judge, max_depth=3, budget=8.0, cap=40000):
     return ""
 
 
-def find_install_via_process(exe_name, judge):
-    """从运行中的进程命令行反查安装根。
+def _walk_up_to_root(start, judge, keep=5):
+    """从 exe 所在目录往上找第一个「像安装根」的目录。
 
-    比快捷方式更准 —— 命令行里是**当前真正在跑的那个** exe 的绝对路径。
-    用户装了三个版本、开的是哪一个，这一层就直接命中哪一个。
+    exe 常在 bin / resources 子目录里，所以不能只看当前层；keep 是层数上限，
+    免得一路走到盘符根也被判真。
+    """
+    cur = start
+    for _ in range(keep):
+        if cur and os.path.isdir(cur) and judge(cur):
+            return cur
+        parent = os.path.dirname(cur) if cur else ""
+        if not parent or parent == cur:
+            break
+        cur = parent
+    return ""
+
+
+def _proc_image_path(pid):
+    """一个进程的可执行文件全路径，拿不到返回 ""。
+
+    为什么不从命令行里抠：命令行是应用自己拼的字符串，包装器会改写、长参数会
+    被截断；镜像路径由内核在启动时记下，进程自己改不了。
+    """
+    if IS_WIN:
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            h = k32.OpenProcess(0x1000, False, int(pid))      # QUERY_LIMITED_INFORMATION
+            if not h:
+                return ""
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = ctypes.c_ulong(1024)
+                if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    return buf.value or ""
+            finally:
+                k32.CloseHandle(h)
+        except Exception:
+            return ""
+        return ""
+    try:
+        return os.path.realpath("/proc/%d/exe" % int(pid))
+    except Exception:
+        return ""
+
+
+def find_install_via_process(exe_name, judge):
+    """从运行中的进程反查安装根。
+
+    比快捷方式更准 —— 用户装了三个版本、开的是哪一个，这一层直接命中哪一个。
+    先问内核要镜像路径，命令行解析只当备胎：有些壳把真正的 exe 藏进子进程参数，
+    那种写法下命令行里出现的仍是父进程目录。
     """
     want = exe_name.lower()
-    for _pid, _name, cmd in list_processes():
-        if not cmd or want not in cmd.lower():
+    for pid, name, cmd in list_processes():
+        if want not in (name or "").lower() and want not in (cmd or "").lower():
             continue
-        for m in re.finditer(r'([A-Za-z]:\\[^"]{0,240}?)\\' + re.escape(exe_name), cmd, re.I):
-            cur = m.group(1)
-            for _ in range(5):                    # exe 可能在 bin 子目录，向上找安装根
-                if cur and os.path.isdir(cur) and judge(cur):
-                    return cur
-                parent = os.path.dirname(cur)
-                if not parent or parent == cur:
+        starts = []
+        img = _proc_image_path(pid)
+        if img and os.path.basename(img).lower() == want:
+            starts.append(os.path.dirname(img))
+        if cmd:
+            starts += [m.group(1) for m in
+                       re.finditer(r'([A-Za-z]:\\[^"]{0,240}?)\\' + re.escape(exe_name),
+                                   cmd, re.I)]
+        for st in starts:
+            found = _walk_up_to_root(st, judge)
+            if found:
+                return found
+    return ""
+
+
+def _dir_of_install_value(v):
+    """卸载登记表里的值 -> 目录。
+
+    InstallLocation 本身就是目录；DisplayIcon 常写成 `"C:////x////app.exe",0`；
+    UninstallString 又可能是 `"C:////x////unins000.exe" /S`。三种形态都得认。
+    """
+    v = (v or "").strip()
+    if not v:
+        return ""
+    if v.startswith('"'):                     # "C:////x////app.exe" /S  -> 只取引号里那段
+        end = v.find('"', 1)
+        if end > 1:
+            v = v[1:end]
+    v = v.split(",")[0].strip()
+    cut = v.lower().find(".exe")              # 后面还挂参数就砍掉
+    if cut >= 0:
+        v = os.path.dirname(v[:cut + 4])
+    return v if v and os.path.isdir(v) else ""
+
+
+def _uninstall_entries():
+    """「应用和功能」里登记的 (显示名, 安装目录)。只读，失败一律当没有。"""
+    if not IS_WIN:
+        return []
+    try:
+        import winreg
+    except Exception:
+        return []
+    out, seen = [], set()
+    hives = [(winreg.HKEY_LOCAL_MACHINE, getattr(winreg, "KEY_WOW64_64KEY", 0)),
+             (winreg.HKEY_LOCAL_MACHINE, getattr(winreg, "KEY_WOW64_32KEY", 0)),
+             (winreg.HKEY_CURRENT_USER, 0)]
+    for hive, view in hives:
+        try:
+            root = winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+                                  0, winreg.KEY_READ | view)
+        except OSError:
+            continue
+        with root:
+            try:
+                total = winreg.QueryInfoKey(root)[0]
+            except OSError:
+                continue
+            for idx in range(total):
+                try:
+                    sub = winreg.EnumKey(root, idx)
+                except OSError:
                     break
-                cur = parent
+                name, loc = "", ""
+                try:
+                    with winreg.OpenKey(root, sub) as k:
+                        name = str(winreg.QueryValueEx(k, "DisplayName")[0] or "")
+                        if not name:
+                            continue
+                        for val in ("InstallLocation", "DisplayIcon",
+                                    "UninstallString", "InstallPath"):
+                            try:
+                                loc = _dir_of_install_value(winreg.QueryValueEx(k, val)[0])
+                            except OSError:
+                                continue
+                            if loc:
+                                break
+                except OSError:
+                    continue
+                if not loc:
+                    continue
+                ck = os.path.normcase(loc)
+                if ck not in seen:
+                    seen.add(ck)
+                    out.append((name, loc))
+    return out
+
+
+def find_install_via_uninstall(exe_names, judge):
+    """在卸载登记表里找安装根。
+
+    装到自定义盘符、又没建快捷方式的机器上，这是唯一还留着的书面记录 ——
+    安装器自己写进去的那个目录。读注册表几毫秒，比实扫盘便宜得多。
+    """
+    if isinstance(exe_names, str):
+        exe_names = (exe_names,)
+    keys = [os.path.splitext(x)[0].lower() for x in exe_names if x]
+    if not keys:
+        return ""
+    for name, loc in _uninstall_entries():
+        blob = (name + " " + loc).lower()
+        if not any(k in blob for k in keys):
+            continue
+        found = _walk_up_to_root(loc, judge)
+        if found:
+            return found
     return ""
 
 
@@ -5619,13 +5911,14 @@ _APP_ROOT_CACHE = {}
 
 
 def discover_app_root(exe_names, judge, depth=3, budget=8.0, cache_sec=180, walk=True):
-    """四源定位一个桌面应用的安装根，返回 (目录, 来源)。
+    """五源定位一个桌面应用的安装根，返回 (目录, 来源)。
 
     顺序按「准、快、省」排：
       进程反查   —— 正在跑的那个，最准，纯内存查询
       切换工具配置 —— wb-switch / cc-switch 里存着各版本绝对路径
       快捷方式   —— 开始菜单 / 桌面 .lnk 里存着 exe 绝对路径
-      有界遍历   —— 前三层都是「读现成记录」，都没有才实扫，所以放最后
+      卸载登记表 —— 安装器写进注册表的 InstallLocation（没建快捷方式时唯一线索）
+      有界遍历   —— 前四层都是「读现成记录」，都没有才实扫，所以放最后
 
     `exe_names` 可以给多个别名（同一个产品的不同 exe 名），逐个试。
     `walk=False` 时跳过实扫 —— 只想知道「装没装」的场景用这个，快得多。
@@ -5656,6 +5949,10 @@ def discover_app_root(exe_names, judge, depth=3, budget=8.0, cache_sec=180, walk
             if root:
                 src = "快捷方式"
                 break
+    if not root:
+        root = find_install_via_uninstall(exe_names, judge)
+        if root:
+            src = "卸载登记表"
     if not root and walk:
         for exe in exe_names:
             root = find_install_by_walk(exe, judge, max_depth=depth, budget=budget)
@@ -7708,7 +8005,7 @@ ZCODE_MEM_FILE = "pojia-yijiantong.md"
 ZCODE_MEM_DIRS = ("cli/memories/global/memory", "memories/global/memory")
 ZCODE_SKILL_DIRS = ("skills", os.path.join(".agents", "skills"))
 ZCODE_SYS_PROMPT_REL = os.path.join("resources", "glm", "zcode.cjs")
-# 四源发现命中的来源（给 --status 显示；find_zcode_cjs 是纯函数，只能靠模块级变量带回）
+# 五源发现命中的来源（给 --status 显示；find_zcode_cjs 是纯函数，只能靠模块级变量带回）
 _ZCODE_SRC = {"src": "", "app": ""}
 ZCODE_MARK = "pojia-yijiantong zcode"
 
@@ -7774,7 +8071,7 @@ def find_zcode_cjs(explicit=""):
         if os.path.isfile(c):
             return c
 
-    # 3.5) 四源发现（v8.2-CE）：进程反查 / 切换工具配置 / 快捷方式 / 有界遍历
+    # 3.5) 五源发现（v8.2-CE）：进程反查 / 切换工具配置 / 快捷方式 / 有界遍历
     #      3) 全是「猜固定目录名」，用户把 ZCode 装到 H:\ZCode 这种自定义一级目录就漏了。
     def _zcode_root_ok(d):
         return bool(d) and (os.path.isfile(os.path.join(d, ZCODE_SYS_PROMPT_REL))
@@ -8653,7 +8950,7 @@ class _MarkBlockTarget:
         return os.path.join(home, self.prompt_file)
 
     def locate(self, args):
-        """配置目录 +（缺失时）用同一套四源链反查安装根。返回 (home, root, src)。
+        """配置目录 +（缺失时）用同一套五源链反查安装根。返回 (home, root, src)。
 
         侦察（--status / --diagnose）和破甲（--apply）都调这里。以前 check() 自己
         写了一份 walk=False 的探针、破甲侧完全不探，于是两边对同一台机器说法不一：
