@@ -124,6 +124,25 @@ def hidden_imports(*sources):
     return seen
 
 
+def runtime_tmpdir_for(args, nt=None):
+    """单文件版的解包目录。空字符串表示不加这个参数。
+
+    默认落点由 bootloader 自己挑，通常是 %TEMP%。有些机器上那个位置建不出
+    目录 —— TEMP 被指到不可写卷、或安全软件不放行在 Temp 下创建可执行目录 ——
+    进程会在 Python 起来之前直接退出，只留一行
+    "Could not create temporary directory"，重下重启都没用。换到用户自己的
+    LocalAppData 下，bootloader 会把整条多级路径自己补出来（实测父目录不存在
+    也能建）。目录形态不解包，这项对它没有意义。
+    """
+    if args.onedir:
+        return ""
+    if args.runtime_tmpdir:
+        return args.runtime_tmpdir
+    if (os.name == "nt") if nt is None else nt:
+        return os.path.join("%LOCALAPPDATA%", "pojia-ce", "rt")
+    return ""
+
+
 def cython_available():
     try:
         import Cython  # noqa: F401
@@ -179,6 +198,9 @@ def main():
                     help="保留中间产物（.py / .c），排查编译问题时用")
     ap.add_argument("--onedir", action="store_true",
                     help="打成目录而不是单文件：启动时不解包，不碰临时目录")
+    ap.add_argument("--runtime-tmpdir", default=None, metavar="PATH",
+                    help="单文件版的解包目录。留空时 Windows 用 "
+                         "%%LOCALAPPDATA%%\\pojia-ce\\rt；onedir 形态忽略此项")
     args = ap.parse_args()
 
     for p in (CORE, GUI):
@@ -242,6 +264,13 @@ def main():
     log("补 %d 个 hidden-import：%s" % (len(hid), " ".join(hid)))
     for m in hid:
         cmd += ["--hidden-import", m]
+    # 单文件版的解包目录见 runtime_tmpdir_for：默认不再用 %TEMP%。
+    rt = runtime_tmpdir_for(args)
+    if rt and args.onedir:
+        log("--onedir 不需要解包目录，--runtime-tmpdir 已忽略")
+    elif rt:
+        log("解包目录：%s" % rt)
+        cmd += ["--runtime-tmpdir", rt]
     cmd.append(entry)
 
     log("PyInstaller（%s）" % ("Cython 编译版" if use_cython else "纯源码"))
