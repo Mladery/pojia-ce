@@ -66,7 +66,11 @@ def test_discover_app_root_labels_uninstall(core, tmp_path, monkeypatch):
 
 
 def test_proc_image_path_self(core):
-    """自己这个进程的镜像路径必须读得出来（Windows 走 Kernel32，其他走 /proc）。"""
+    """自己这个进程的镜像路径：Windows 走 Kernel32，Linux 走 /proc，macOS 两条都没有。"""
     p = core._proc_image_path(os.getpid())
-    assert p and os.path.isabs(p)
+    if core.IS_WIN or os.path.isdir("/proc/self"):
+        assert p and os.path.isabs(p)
+    else:
+        # 没有 procfs 的平台返回空，定位链自动退到命令行与快捷方式
+        assert p == ""
     assert core._proc_image_path(-1) == ""
