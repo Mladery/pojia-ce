@@ -11034,14 +11034,23 @@ def _snap_menu(args):
 _pause_needed = False
 
 
-def _pause_on_exit():
-    if QUIET or not _pause_needed:
-        return
+def _hold_screen():
+    """有真终端就等一次回车，没有就立刻返回。
+
+    打包版双击运行时控制台是本进程独占的，程序一退窗口就关，提示等于没出现。
+    从 cmd / bat 里跑时窗口还在，多按一次回车纯属打扰 —— 所以只在冻结态调用。
+    """
     try:
         if sys.stdin and sys.stdin.isatty():
             input("\n按回车键退出…")
     except Exception:
         pass
+
+
+def _pause_on_exit():
+    if QUIET or not _pause_needed:
+        return
+    _hold_screen()
 
 
 def check_runtime():
@@ -11073,23 +11082,95 @@ def check_runtime():
         sys.exit(1)
 
 
+def _want_interactive(args, argc=None):
+    """该不该进交互菜单。
+
+    两种都算：一个参数都没有（双击 / `python 破甲一键通.py`），或者显式给了
+    `--menu`。以前只看 `argc <= 1`，于是 `exe --menu` 因为长度是 2 被判成
+    「非交互」，而 --menu 又不算任何动作 → 一路落到 run_status：用户想看菜单，
+    结果跑了一遍检测。源码态 `python 破甲一键通.py --menu` 同样被吃掉。
+    """
+    if argc is None:
+        argc = len(sys.argv)
+    return argc <= 1 or bool(getattr(args, "menu", False))
+
+
+def _cmd_name():
+    """帮助与提示里怎么称呼自己。
+
+    打包版还写 `python 破甲一键通.py`，会让人以为得先装 Python；直接给 exe 名。
+    """
+    base = os.path.basename(SELF)
+    return base if getattr(sys, "frozen", False) else "python " + base
+
+
+class _Parser(argparse.ArgumentParser):
+    """参数出错时给中文提示，别把 argparse 的英文原文糊在脸上就退。
+
+    打包版双击运行，报错后控制台可能一闪而过 —— 让提示留在屏幕上靠入口那段
+    预设的暂停，这里只负责把话说清楚。
+    """
+
+    def error(self, message):
+        raw = (message or "").strip()
+        say("")
+        if raw.startswith("unrecognized arguments"):
+            # argparse 原文是 `unrecognized arguments: --xx`，照抄会让同一句出现两次
+            bad = raw.split(":", 1)[-1].strip()
+            say("  参数有问题：认不出 %s" % bad, "red")
+            if bad and not bad.startswith("-"):
+                say("    看着像文件路径 —— 参数只认 -- 开头的开关，本工具不吃拖放。", "dg")
+        else:
+            say("  参数有问题：%s" % raw, "red")
+        say("    全部参数：%s --help" % _cmd_name(), "dg")
+        say("    命令行菜单：%s --menu" % _cmd_name(), "dg")
+        self.exit(2)
+
+    def exit(self, status=0, message=None):
+        """`--help`、`--version`、参数错误都从这里出去。
+
+        打包版双击时控制台是本进程独占的，打印完直接退等于窗口一闪而过 ——
+        冻结态先停一下。从 cmd / bat 里跑时 stdio 不是 tty 或窗口还在，
+        `_hold_screen` 自己会立刻返回。
+        """
+        if message:
+            sys.stderr.write(message)
+        if getattr(sys, "frozen", False):
+            _hold_screen()
+        raise SystemExit(status)
+
+
+def _epilog():
+    """`--help` 底部的示例。
+
+    表驱动而不是手写空格：打包版和源码态的命令名宽度差一大截，按显示宽度补
+    空格才能对齐（中文字符占两格）。
+    """
+    rows = [("", "交互菜单"),
+            ("--menu", "命令行交互菜单（打包版不带参数时默认开图形界面）"),
+            ("--status", "只读检测所有目标"),
+            ("--dry-run", "预演"),
+            ("--apply", "全部打一遍"),
+            ("--apply --target wb --full", "只打 WorkBuddy（含闸门/网页过滤/文件保护）"),
+            ("--revert --target dsh", "只还原 DSH"),
+            ("--pick dsh", "手动指定 DSH 安装目录（弹系统目录窗口）"),
+            ("--pick all --clear", "清除手动指定，改回自动探测"),
+            ("--guard install", "装 WorkBuddy 守护任务")]
+    cmd = _cmd_name()
+    lines = ["示例："]
+    for arg, desc in rows:
+        head = (cmd + " " + arg).strip()
+        lines.append("  " + head + " " * max(2, 52 - dwidth(head)) + desc)
+    return "\n".join(lines) + "\n"
+
+
 def build_parser():
-    p = argparse.ArgumentParser(
+    p = _Parser(
         description="破甲一键通 v%s —— %s，共 %d 个目标一键破甲"
                     % (VER_TAG, " / ".join(TARGET_LABEL[k] for k in DEFAULT_TARGETS),
                        len(DEFAULT_TARGETS)),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""示例：
-  python 破甲一键通.py                              交互菜单
-  python 破甲一键通.py --status                     只读检测所有目标
-  python 破甲一键通.py --dry-run                    预演
-  python 破甲一键通.py --apply                      全部打一遍
-  python 破甲一键通.py --apply --target wb --full   只打 WorkBuddy（含闸门/网页过滤/文件保护）
-  python 破甲一键通.py --revert --target dsh        只还原 DSH
-  python 破甲一键通.py --pick dsh                   手动指定 DSH 安装目录（弹系统目录窗口）
-  python 破甲一键通.py --pick all --clear           清除手动指定，改回自动探测
-  python 破甲一键通.py --guard install              装 WorkBuddy 守护任务
-""")
+        epilog=_epilog())
     p.add_argument("--target", default="all", help="all|dsh|wb|zcode|codex|cursor|claude，可逗号分隔（默认 all）")
     p.add_argument("--status", action="store_true", help="只读：检测所有目标")
     p.add_argument("--diagnose", action="store_true", help="只读：详细取证")
@@ -11175,6 +11256,12 @@ def build_parser():
                    help="打开图形界面（本机网页 UI，零依赖）")
     p.add_argument("--menu", action="store_true",
                    help="打包版双击进来默认开图形界面；加这个走命令行交互菜单")
+    p.add_argument("--pause", action="store_true",
+                   help="跑完停一下等回车（快捷方式里预置参数时用；--quiet 下无效）")
+    # 位置参数只有一个用途：接住「把文件拖到 exe 图标上」这种误操作。不给它
+    # 注册的话，拖进来的路径会变成 unrecognized arguments，用户看到的是一串
+    # 英文报错 + 闪退，完全猜不到发生了什么。
+    p.add_argument("files", nargs="*", metavar="文件", help=argparse.SUPPRESS)
     # 每个标记块目标都有自己的 --<key>-dir。以前只显式注册了 codex / cursor / claude
     # 三个，其余十个在提示里写着「用 --cline-dir 指定」，实际根本没注册 —— 用户照着
     # 敲就撞 unrecognized arguments，越按提示走越进不去。这里按 TARGETS 兜底补齐，
@@ -11449,12 +11536,21 @@ def main():
     _init_console()
 
     args = build_parser().parse_args()
+    if getattr(args, "files", None):
+        # 拖到图标上想「用这个工具打开它」——本工具没有这个用法，直说。
+        say("")
+        say("  带进来的文件：%s" % "  ".join(args.files[:5]), "y")
+        say("  这是命令行工具的参数入口，不接受拖放文件。", "dg")
+        say("  直接双击 → 图形界面；命令行菜单 → %s --menu" % _cmd_name(), "dg")
+        return
     if getattr(args, "gui", False):
         _launch_gui()
+        _pause_needed = False              # 界面已经拦了一道，关掉后不必再按回车
         return
     # 双击打包版进来（没有任何参数）先开界面；起不来（包里没带 GUI）就落到菜单，
     # 别让用户对着一个空控制台。
     if _default_to_gui(args) and _launch_gui():
+        _pause_needed = False
         return
     if args.quiet:
         QUIET = True
@@ -11474,8 +11570,9 @@ def main():
         args.revert = True
     args.full = args.full or False
 
-    interactive = (len(sys.argv) <= 1)
-    _pause_needed = interactive and not QUIET
+    interactive = _want_interactive(args)
+    # 菜单退出后不必再按一次回车（菜单里已经 wait_enter 过）；--pause 才留屏。
+    _pause_needed = bool(getattr(args, "pause", False)) and not QUIET
 
     say("")
     header("一套人格 · 一个脚本",
