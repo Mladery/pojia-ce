@@ -2,10 +2,11 @@
 
 破甲一键通 · 社区版（`pojia-ce`）的逐版改动。**README 只留工具说明与索引，实现细节、踩过的坑、验证方式都在这里。**
 
-版本号分两段：`VERSION`（机器值，写进护照和标记块）+ `EDITION`（只拼到对外显示上，`VER_TAG = "8.62-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。带 tag 的版本在 [Releases](https://github.com/Mladery/pojia-ce/releases) 里，发布说明在 [docs/release-notes/](docs/release-notes/)。
+版本号分两段：`VERSION`（机器值，写进护照和标记块）+ `EDITION`（只拼到对外显示上，`VER_TAG = "8.63-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。带 tag 的版本在 [Releases](https://github.com/Mladery/pojia-ce/releases) 里，发布说明在 [docs/release-notes/](docs/release-notes/)。
 
 | 版本 | 日期 | 主题 |
 |---|---|---|
+| [`v8.63-CE`](#v863-ce-2026-11-06) | 2026-11-06 | `--update` 自更新 / bash 工具换 busybox ash（受限沙箱内可跑） / 告诉模型这是 ash 不是 bash |
 | [`v8.62-CE`](#v862-ce-2026-11-05) | 2026-11-05 | DSH 0.2.2 适配（预算分链 / 预设身份） / 真实桌面路径 / 两个新定位来源 / 命令行入口修复 |
 | [`v8.61-CE`](#v861-ce-2026-11-04) | 2026-11-04 | Gemini CLI 换成 Antigravity / Gemini 特化段 / 24 KB 拆分双文件 |
 | [`v8.60-CE`](#v860-ce-2026-11-04) | 2026-11-04 | ZCode 加 GLM 专用段 / Kiro 按 Claude 处理 / 判定样板 |
@@ -23,6 +24,83 @@
 | [`v8.3-CE`](#v83-ce-2026-11-01) | 2026-11-01 | 写后自检 / 长路径 / 镜像层 / Electron 保险丝 / Trae 双发行版 |
 | [`v8.2-CE`](#v82-ce-2026-11-01) | 2026-11-01 | `wbintl` / 四源安装根发现 / 快照体检 / 图形界面 / DSH 0.2.1-rc.5 适配 |
 | [`v8.0-CE`](#v80-ce-2026-10-29) | 2026-10-29 | 起点：摘掉加密封条，转社区独立维护 |
+
+---
+
+## v8.63-CE (2026-11-06)
+
+两件事：自己会更新了；DSH 的 `bash` 工具不再要求「完全访问」才肯跑。
+
+### 自更新：`--update` / `--check-update`
+
+```
+破甲一键通 --check-update     # 只问一句，不动文件
+破甲一键通 --update           # 有新版就下、校验、替换
+```
+
+版本比较用 tag 的数字段（`v8.63-CE` → `(8, 63)`），`-CE` 后缀不参与 —— 否则上游发个 `v8.63` 就会被判成「不同版本」来回刷。资产名按平台定死：Windows 取 `pojia-ce-windows-x64.exe`，macOS 按 `arm64` / `x64` 分，其余 `linux-x64`。
+
+下载不认「HTTPS 就够了」：同一批 Release 里的 `SHA256SUMS.txt` 一并取下来比对，对不上就删文件、报错、不安装。没有 `SHA256SUMS.txt` 的发布照装（旧版本没这文件），但会在输出里说一句。
+
+**Windows 不能自己覆盖自己。** 正在运行的 exe 是被锁住的，`os.replace` 必然失败。所以写一个 `_update.bat`：等 4 秒轮询到主进程退出，再 `move /y` 顶掉，最后把 `.bat` 自己删了。POSIX 上 `os.replace` 原子替换就够。源码态（非冻结）拒绝替换 —— 那种情况下「替换」等于覆盖正在被 git 管的 `.py`，不是用户想要的。
+
+启动时静默检查一次，结果缓存进 `状态/_update.json` 一天，过期才再发请求：不然每次开都多几百毫秒，还得罪一遍 GitHub 的限流。
+
+### `bash` 工具报 0xC0000142：不是 DLL 的错
+
+DSH 里调 `bash` 工具，退出码 `3221225794` —— 也就是 `0xC0000142`，`STATUS_DLL_INIT_FAILED`。名字很误导，DLL 一点问题都没有。手工复现能拿到真话：
+
+```
+runner.js --mode read-only -- bash -c "echo hi"
+→ couldn't create signal pipe, Win32 error 5
+```
+
+Git Bash 是 MSYS2 运行时，启动第一件事是建一根 signal pipe。沙箱把子进程塞进 `WRITE_RESTRICTED` 令牌（完整性降到 Low，restricting 列表 = 登录 SID + Everyone + 工作区 + 临时目录），msys 建管道时自带 `SECURITY_ATTRIBUTES`，写进去的那份 DACL 里没有任何一个 restricting SID —— `CreateNamedPipeW` 直接 `ACCESS_DENIED`，msys 就以 `0xC0000142` 退出。**只有切到「完全访问」才跑得动**，正是用户看到的现象。
+
+三个「大概是它」的假设都试过，都不是：
+
+| 假设 | 改法 | 结果 |
+|---|---|---|
+| 完整性降到 Low 导致 | 去掉 `restrictTokenIntegrity` | 仍 0xC0000142 |
+| restricting 列表缺 INTERACTIVE | 加 `S-1-5-4` | 仍失败 |
+| 令牌 default DACL 只授了一个 SID | 对全部 restricting SID 授予 | 仍失败 |
+
+反过来验证，同一套受限令牌下 `cmd.exe`、`powershell.exe`、`python.exe` 全部 exit 0；Python 在沙箱里 `os.pipe()` 和不带显式 DACL 的 `CreateNamedPipeW` 也都正常。**问题只在 msys 那份自带 DACL 的管道上。**
+
+沙箱一行没动。换的是 shell 实现：`busybox-w32` 的 `sh`（ash）——原生 Win32、静态链接、不建命名管道，同样的令牌下跑得干干净净。`workspace-write` 模式复核过：`echo > 工作区/ok.txt` 成功，`echo > 工作区/../outside.txt` 仍是 `Permission denied`，写限制原样生效。
+
+### 换法是插件，不动宿主文件
+
+`LocalBashExecutor.execute()` 里写死 `['bash', '-c', spec.command]`，但它调的是自己的 `executeArgv(spec, argvOrPrepare, onStarted)`。插件包一层就够了：
+
+```javascript
+shell.executeArgv = (spec, argvOrPrepare, onStarted) => {
+  if (typeof argvOrPrepare === "function") {
+    return orig(spec, async (s) => swap(await argvOrPrepare(s), bb), onStarted);
+  }
+  return orig(spec, swap(argvOrPrepare, bb), onStarted);
+};
+```
+
+`argvOrPrepare` 有数组和「返回 argv 的函数」两种形态，只认前者的话，凡是带 signal 的调用都会漏掉。`swap` 只改首项恰好是 `bash` 的，`git status` 这类原样透传。
+
+同一个插件里还顺手修了 PATH：`System32\bash.exe` 是 WSL 入口，Windows 的系统目录排在用户目录前面，不前置 Git 的 `bin` 的话命令会被 WSL 接走，报出来的路径全是 `/mnt/c/...`。
+
+**busybox 是内嵌的**（`BUSYBOX_B64`，zlib + base64，解压后 sha256 钉在 `BUSYBOX_SHA256`）。装插件时落到插件目录，大小一致就不重写（避免每次安装都动 mtime），解不出来或没落盘就退回 Git Bash 并在 `--status` 报 warn。代价是源码从 572 KB 涨到 1.16 MB —— 换离线可用，认了。
+
+### 但工具名还叫 `bash`
+
+底下跑的是 ash，名字还叫 bash，模型会照 bash 写：`arr=(a b)`、`[[ ]]`、`<<<`、`<(...)`、`{a,b}`、`$'...'`、`mapfile`、`local -n` —— 然后一条一条报语法错。
+
+改名做不到：`defineTool({ name: 'bash', ... })` 是 `tool-bash` 里的字面量，`ToolsService.register()` 只能新增或遮蔽，`restrict()` 只能放行或拒绝，没有「换个名字挂上去」的口子。
+
+所以改语义。插件往 systemPrompt 里塞一段：
+
+```javascript
+scope.systemPrompt.context({ name: "pojia:shell-dialect", order: 117, text: () => ASH_NOTE });
+```
+
+`order` 取 117，排在 `SANDBOX_POLICY`(110) 和 `APPROVAL_POLICY`(115) 后面 —— 这条是「怎么写命令」的执行细节，不该盖在策略前面。正文直接点名 `busybox ash`、逐条列出不能用的 bash 独有语法，并给出替代写法（进程替换 → 先写中间文件）。
 
 ---
 

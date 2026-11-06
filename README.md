@@ -1,6 +1,6 @@
 # 破甲一键通 · 社区版
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.62-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.63-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。MIT，**非官方**，与原作者无隶属关系。
 > 仅限在**自己有权管理的本机设备**上使用，下载前请读 [完整免责声明](docs/免责声明.md)。
 
@@ -99,7 +99,7 @@ python src/破甲GUI.py                         # 图形界面（本机网页）
 在客户端**新会话**里单独发一句 `破甲自检`，只回这一行就说明人格真载入了：
 
 ```
-破甲自检成功 | 社区版v8.62 | 仓库地址：https://github.com/Mladery/pojia-ce
+破甲自检成功 | 社区版v8.63 | 仓库地址：https://github.com/Mladery/pojia-ce
 ```
 
 回复带解释、加戏或拒答 → 人格没生效，先确认目标已**重启**（改的是磁盘文件，运行中的进程不会重读）。
@@ -134,6 +134,7 @@ CI 每次推 `main` 都打一遍，打 tag 时自动发 Release：
 
 | 版本 | 主题 |
 |---|---|
+| [`v8.63-CE`](CHANGELOG.md#v863-ce-2026-11-06) | `--update` 自更新 / bash 换 busybox ash（受限沙箱内可跑） |
 | [`v8.62-CE`](CHANGELOG.md#v862-ce-2026-11-05) | DSH 0.2.2 适配（预算分链 / 预设身份） / 真实桌面路径 / 卸载登记表 |
 | [`v8.61-CE`](CHANGELOG.md#v861-ce-2026-11-04) | Gemini CLI 换成 Antigravity：Gemini 特化段 + 双文件拆分 |
 | [`v8.60-CE`](CHANGELOG.md#v860-ce-2026-11-04) | ZCode 加 GLM 专用段 / Kiro 按 Claude 处理 / 判定样板 |
@@ -262,7 +263,7 @@ python 破甲一键通.py --persona-set ""           # 清空，回到 persona.m
 ## 校验
 
 ```
-2e9b22c4135bb791a81d5ca00ba2fd4a5079c12e1582043fcee6015113684270  src/破甲一键通.py           (572,006 B / LF)
+51214a023ab1cd76736816477fa5a76ef114a39ee6bd3b4b80f970d15c018bd0  src/破甲一键通.py           (1,190,523 B / LF)
 fb0421f93341c30406a2cfcfbdb4c700f441f37987c87395abcdbccd2f21c1bc  src/破甲GUI.py              (47,512 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```
