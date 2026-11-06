@@ -58,3 +58,44 @@ def test_hold_screen_waits_in_real_terminal(core, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda *a: calls.append(a))
     core._hold_screen()
     assert len(calls) == 1
+
+
+def test_check_update_parses_core_output(gui, monkeypatch):
+    """界面不自己算版本：跑一次 --check-update，把那一行读懂就行。"""
+    class R:
+        stdout = "  最新发布：8.70　当前：8.63\n  有新版本。升级：pojia-ce --update\n".encode()
+
+    monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k: R())
+    d = gui.check_update()
+    assert d["ok"] and d["newer"]
+    assert (d["latest"], d["current"]) == ("8.70", "8.63")
+
+
+def test_check_update_reports_up_to_date(gui, monkeypatch):
+    class R:
+        stdout = "  最新发布：8.63　当前：8.63\n  已是最新\n".encode()
+
+    monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k: R())
+    d = gui.check_update()
+    assert d["ok"] and not d["newer"]
+
+
+def test_check_update_reports_failure(gui, monkeypatch):
+    """查不到不算「没有新版」——ok=False 时界面什么条都不亮。"""
+    class R:
+        stdout = "  检查更新失败：no route\n".encode()
+
+    monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k: R())
+    assert gui.check_update()["ok"] is False
+
+
+def test_install_button_maps_to_update_flag(gui):
+    """「安装」按钮最终就是一条 --update；界面自己不做下载。"""
+    assert gui.build_cmd("update", [])[-1] == "--update"
+
+
+def test_page_has_install_banner(gui):
+    page = gui.render_page()
+    assert 'id="u-bar"' in page and 'id="u-go"' in page
+    assert "/api/update" in page            # 只读检查的入口
+    assert 'run("update")' in page          # 按钮走同一个 run()

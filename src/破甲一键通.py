@@ -15658,12 +15658,13 @@ def menu(args):
                      "  [7] WorkBuddy 守护    安装 / 卸载 / 查看后台守护任务",
                      "  [8] 体检（只读）      磁盘态 / 凭证 / 自证就绪，不改盘",
                      "  [9] WorkBuddy 快照    生成基准 / 与基准对比",
+                     "  [u] 检查更新          只查有没有新版，查到了再问你要不要装",
                      "  [0] 退出"):
             print(BOLD(CYAN("║")) + fit(line, W) + BOLD(CYAN("║")))
         print(BOLD(CYAN("╚" + "═" * W + "╝")))
         _flush_stdin()                      # 清掉上一轮残留的换行，避免空输入直接跳过菜单
         try:
-            c = input(BOLD(GREEN("  请选择 (0-9) > "))).strip().lstrip("\ufeff")
+            c = input(BOLD(GREEN("  请选择 (0-9, u) > "))).strip().lstrip("\ufeff")
         except (EOFError, KeyboardInterrupt):
             print()
             return
@@ -15711,6 +15712,17 @@ def menu(args):
                 run_check(args)
             elif c == "9":
                 _snap_menu(args)
+            elif c in ("u", "U"):
+                # 只查、只报，装不装再问一次 —— 菜单里不该出现「悄悄就装了」。
+                ver, _assets, err = update_check()
+                if err or not ver:
+                    say("  检查更新失败：%s" % (err or "没读到版本号"), "y")
+                elif _ver2(ver) <= _ver2(VERSION):
+                    say("  已是最新（%s）" % VER_TAG, "g")
+                else:
+                    say("  最新发布：%s　当前：%s" % (ver, VERSION), "dg")
+                    if _confirm("现在下载并安装 %s ？装完本进程退出才换文件。" % ver):
+                        run_update()
             else:
                 continue
         except KeyboardInterrupt:
@@ -16087,6 +16099,8 @@ def build_parser():
     p.add_argument("--update", action="store_true", help="检查并安装新版本")
     p.add_argument("--check-update", dest="check_update", action="store_true",
                    help="只检查有没有新版本")
+    p.add_argument("--no-update-check", dest="no_update_check", action="store_true",
+                   help="启动时不查更新（默认只查一次、只提示，从不自动安装）")
     p.add_argument("--diagnose", action="store_true", help="只读：详细取证")
     p.add_argument("--check", action="store_true",
                    help="只读体检：磁盘态 / 明文凭证提示 / 自证就绪（绝不改盘，有问题退出码 1）")
@@ -16448,6 +16462,11 @@ def run_persona(args):
 # 发布在 GitHub Releases。检查只读 latest，安装只下当前平台那一个资产，下完先按
 # 同批的 SHA256SUMS.txt 校验再换文件。换的动作必须等主进程退出（Windows 上运行中
 # 的 exe 不能覆盖），所以 Windows 走一个批处理；POSIX 直接 os.replace。
+#
+# **从不静默安装。** 启动时只查一次「有没有新版」（`update_hint`），只读 GitHub
+# 公开的 releases/latest，不带任何本机信息，结果缓存一天；不下载、不替换、不重启。
+# 真升级必须用户自己敲 --update。不想让它联网：--no-update-check 或
+# 环境变量 POJIA_NO_UPDATE_CHECK=1。
 UPDATE_API = REPO_URL.replace("https://github.com/", "https://api.github.com/repos/") + "/releases/latest"
 
 
@@ -16592,11 +16611,19 @@ def run_update(check_only=False):
     return 0 if ok else 1
 
 
-def update_hint():
-    """启动时看一眼有没有新版，结果缓存一天 —— 每次开都发请求会白等。
+def update_hint(args=None):
+    """启动时看一眼有没有新版，只提示、不安装。
 
-    没网、限流、被墙都只是安静跳过：更新提示不该挡住任何正常操作。
+    请求的是 GitHub 公开的 releases/latest：不带任何本机信息、不带标识、不发
+    query，只读回一个 JSON。结果缓存一天（状态/_update.json），不然每次开都多
+    几百毫秒，还得罪一遍限流。没网、限流、被墙一律安静跳过。
+
+    不想让它联网：`--no-update-check` 或环境变量 `POJIA_NO_UPDATE_CHECK=1`。
     """
+    if os.environ.get("POJIA_NO_UPDATE_CHECK"):
+        return
+    if args is not None and getattr(args, "no_update_check", False):
+        return
     path = os.path.join(STATE_DIR, "_update.json")
     now = time.time()
     ver = ""
@@ -16676,8 +16703,9 @@ def main():
     # 菜单退出后不必再按一次回车（菜单里已经 wait_enter 过）；--pause 才留屏。
     _pause_needed = bool(getattr(args, "pause", False)) and not QUIET
 
+    # 只查「有没有新版」，不下载、不安装；--no-update-check 可整个关掉。
     if interactive and not QUIET:
-        update_hint()
+        update_hint(args)
     say("")
     header("一套人格 · 一个脚本",
            " / ".join(TARGET_LABEL[k] for k in DEFAULT_TARGETS))

@@ -127,6 +127,39 @@ def core_version():
     return "?"
 
 
+# ---- 更新检查（只读） --------------------------------------------------------
+# 界面只做两件事：问一句「有没有新版」，以及在你按下按钮之后跑 `--update`。
+# 从不自己下载、自己替换 —— 装不装、什么时候装，由点按钮的人决定。
+_UPDATE_LINE = re.compile(r"最新发布：\s*([0-9][0-9.]*)\s+当前：\s*([0-9][0-9.]*)")
+
+
+def _core_args(extra):
+    """跑一次核心命令的 argv。源码态喂 .py，打包态直接拿自己当命令行。"""
+    return ([sys.executable] if FROZEN else [sys.executable, "-u", CORE]) + list(extra)
+
+
+def _dotted(s):
+    """'8.63-CE' -> (8, 63)。认不出来当 0.0。"""
+    m = re.search(r"(\d+)\.(\d+)", str(s or ""))
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def check_update(timeout=15):
+    """跑一次 `--check-update`，把结果解析成 dict。只读，不下载。"""
+    try:
+        r = subprocess.run(_core_args(["--check-update"]), stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=timeout,
+                           creationflags=_spawn_flags())
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "note": "检查失败：%s" % e}
+    m = _UPDATE_LINE.search((r.stdout or b"").decode("utf-8", "replace"))
+    if not m:
+        return {"ok": False, "note": "没读到版本号"}
+    latest, cur = m.group(1), m.group(2)
+    return {"ok": True, "latest": latest, "current": cur,
+            "newer": _dotted(latest) > _dotted(cur), "note": ""}
+
+
 TARGETS = [
     ("dsh", "DeepSeek Harness"),
     ("wb", "WorkBuddy"),
@@ -207,6 +240,9 @@ def build_cmd(action, targets, dsh_mode="inject", git_bash=False):
         return base + ["--snapshot"]
     if action == "compare":
         return base + ["--compare"]
+    if action == "update":
+        # 只有点了「安装」按钮才会走到这儿；下载 + 校验 + 安排替换都在核心里做。
+        return base + ["--update"]
     return None
 
 
@@ -291,6 +327,18 @@ PAGE = r"""<!DOCTYPE html>
               border-left:1px solid var(--line-2); padding-left:9px}
   .brand .ver{font-size:11.5px; color:var(--ink-3)}
   .grow{flex:1}
+
+  /* ── 更新条：查到了才出现，装不装由你点 ───────────────── */
+  .updatebar{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    margin:12px 0 0; padding:9px 12px; border-radius:var(--r-sm);
+    border:1px solid var(--line-2); background:var(--accent-soft);
+    font-size:13px; color:var(--ink-2);
+  }
+  .updatebar[hidden]{display:none}
+  .u-dot{width:7px; height:7px; flex:none; border-radius:50%; background:var(--accent)}
+  .u-text{min-width:0}
+  .u-text b{color:var(--ink); font-weight:600}
   .state{
     display:inline-flex; align-items:center; gap:7px;
     padding:4px 11px 4px 9px; border-radius:999px;
@@ -592,6 +640,14 @@ PAGE = r"""<!DOCTYPE html>
     <span class="state" id="state"><i></i><span id="state-text">待命中</span></span>
   </header>
 
+  <div class="updatebar" id="u-bar" hidden>
+    <span class="u-dot" aria-hidden="true"></span>
+    <span class="u-text" id="u-text"></span>
+    <span class="grow"></span>
+    <button type="button" class="btn primary" id="u-go">安装</button>
+    <button type="button" class="link" id="u-no">以后再说</button>
+  </div>
+
   <section class="hero">
     <h1>解锁 AI 编程工具被藏起来的能力</h1>
     <p class="lede">勾选你用到的软件，点一下「一键破甲」就行。没装的会自动跳过，改错了随时能还原。</p>
@@ -722,6 +778,7 @@ PAGE = r"""<!DOCTYPE html>
 
 <script>
 const TOKEN = "__TOKEN__";
+const VERSION = "__VERSION__";
 const TARGETS = __TARGETS__;
 const ACTIONS = __ACTIONS__;
 const IS_WIN = __ISWIN__;
@@ -734,6 +791,7 @@ const chipsEl = $("chips"), actsEl = $("acts"), acts2El = $("acts2"), outEl = $(
 const stateEl = $("state"), stateText = $("state-text"), countEl = $("count");
 const elapsedEl = $("elapsed"), consoleEl = $("console"), optsEl = $("opts");
 const goBtn = $("go"), hintEl = $("hint");
+const uBar = $("u-bar"), uText = $("u-text"), uGo = $("u-go"), uNo = $("u-no");
 
 /* 软件清单 */
 TARGETS.forEach(([key, label]) => {
@@ -974,6 +1032,35 @@ async function run(action){
 }
 
 sync();
+
+/* ── 更新提示 ────────────────────────────────────────────────
+   进页面问一次「有没有新版」：只读 GitHub 的发布信息，不带任何本机内容。
+   查到就亮一条，装不装、什么时候装，由按按钮的人决定 —— 从不自己动手。 */
+async function probeUpdate(){
+  /* 点过「以后再说」就这次版本内不再问（下次开还是同一版，没必要反复问） */
+  if (localStorage.getItem("pojia.skipUpdate") === VERSION) return;
+  try{
+    const res = await fetch(`/api/update?t=${TOKEN}`);
+    if (!res.ok) return;
+    const d = await res.json();
+    if (!d.ok || !d.newer) return;
+    uText.innerHTML = `有新版本 <b class="mono">v${esc(d.latest)}</b> 可以装`
+      + `（当前 v${esc(d.current)}）。装完关掉这个窗口就行，程序会自己换好再打开。`;
+    uGo.textContent = `安装 v${d.latest}`;
+    uBar.hidden = false;
+  }catch(e){ /* 没网、限流、被墙都当没这回事 */ }
+}
+
+uGo.onclick = () => {
+  uBar.hidden = true;
+  run("update");
+};
+uNo.onclick = () => {
+  uBar.hidden = true;
+  try{ localStorage.setItem("pojia.skipUpdate", VERSION); }catch(e){}
+};
+
+probeUpdate();
 </script>
 </body>
 </html>
@@ -1004,6 +1091,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._authorized():
             self.send_error(403, "bad token")
+            return
+        if self.path.startswith("/api/update"):
+            # 只读：跑一次 --check-update，回一个 JSON。不下载、不改盘。
+            body = json.dumps(check_update(), ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
             return
         body = render_page().encode("utf-8")
         self.send_response(200)

@@ -151,3 +151,70 @@ def test_install_windows_bat_waits_and_takes_over(core, monkeypatch, tmp_path):
     assert ":wait" in txt and "goto wait" in txt
     assert txt.index(":wait") < txt.index('move /y "%s"' % (tmp_path / "new.exe"))
     assert spawned, "没起批处理，替换永远不会发生"
+
+
+def test_hint_off_with_flag(core, monkeypatch):
+    """--no-update-check：一个请求都不该发出去。"""
+    def boom(timeout=8):
+        raise AssertionError("关了还联网")
+
+    monkeypatch.setattr(core, "update_check", boom)
+    core.update_hint(type("A", (), {"no_update_check": True})())
+
+
+def test_hint_off_with_env(core, monkeypatch):
+    monkeypatch.setenv("POJIA_NO_UPDATE_CHECK", "1")
+
+    def boom(timeout=8):
+        raise AssertionError("关了还联网")
+
+    monkeypatch.setattr(core, "update_check", boom)
+    core.update_hint(None)
+
+
+def test_hint_prints_once_then_caches(core, monkeypatch, tmp_path, capsys):
+    """查到新版只打印一行提示，并把结果缓存一天 —— 第二次不再发请求。"""
+    monkeypatch.delenv("POJIA_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.setattr(core, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(core, "QUIET", False)
+    monkeypatch.setattr(core, "_C", {})
+    calls = []
+
+    def fake(timeout=8):
+        calls.append(1)
+        return "9.99", {}, ""
+
+    monkeypatch.setattr(core, "update_check", fake)
+    core.update_hint(None)
+    out = capsys.readouterr().out
+    assert "9.99" in out and "--update" in out
+    assert os.path.isfile(str(tmp_path / "_update.json"))
+    assert calls == [1]
+
+    core.update_hint(None)                    # 缓存命中，不再请求
+    assert calls == [1]
+
+
+def test_hint_quiet_when_up_to_date(core, monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("POJIA_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.setattr(core, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(core, "QUIET", False)
+    monkeypatch.setattr(core, "_C", {})
+    monkeypatch.setattr(core, "update_check", lambda timeout=8: (core.VERSION, {}, ""))
+    core.update_hint(None)
+    assert "有新版本" not in capsys.readouterr().out
+
+
+def test_hint_survives_network_error(core, monkeypatch, tmp_path, capsys):
+    """没网 / 限流时安静跳过，不能把启动流程带崩。"""
+    monkeypatch.delenv("POJIA_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.setattr(core, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(core, "QUIET", False)
+    monkeypatch.setattr(core, "_C", {})
+
+    def boom(url, timeout=8):
+        raise OSError("no route")
+
+    monkeypatch.setattr(core, "_http_get", boom)
+    core.update_hint(None)
+    assert "错误" not in capsys.readouterr().out

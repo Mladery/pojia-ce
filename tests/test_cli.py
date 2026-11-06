@@ -64,6 +64,16 @@ def test_help_lists_every_target_and_dir_flag(core, clean_env):
     for key in core.DEFAULT_TARGETS:
         assert key in r.stdout, "--help 里没有目标 %s" % key
     assert "--kiro-dir" in r.stdout
+    # 联网检查是可关的，开关必须能被发现
+    assert "--no-update-check" in r.stdout
+
+
+def test_no_update_check_is_accepted(core, clean_env):
+    """--no-update-check 要能真的解析进来，而不是 unrecognized arguments。"""
+    env, _home = clean_env
+    r = run(["--no-update-check", "--status", "--target", "kiro"], env)
+    assert r.returncode == 0, r.stderr
+    assert "unrecognized" not in (r.stdout + r.stderr)
 
 
 def test_status_on_clean_machine(core, clean_env):
