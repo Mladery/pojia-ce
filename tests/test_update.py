@@ -56,13 +56,14 @@ def test_download_verifies_sha256(core, monkeypatch, tmp_path):
     table = "%s  pojia-ce-linux-x64\n" % good
 
     def fake(url, timeout=8):
-        return table.encode() if url.endswith("SHA256SUMS.txt") else blob
+        return table.encode() if url == "s" else blob
 
     monkeypatch.setattr(core, "_http_get", fake)
     monkeypatch.setattr(core, "update_asset", lambda: "pojia-ce-linux-x64")
     dst = str(tmp_path / "new.bin")
     ok, msg = core.update_download({"pojia-ce-linux-x64": "u", "SHA256SUMS.txt": "s"}, dst)
     assert ok, msg
+    assert "无校验和" not in msg            # 真比过了，不是「没表可依」蒙过去的
     assert open(dst, "rb").read() == blob
 
 
@@ -82,6 +83,30 @@ def test_download_without_checksum_still_installs(core, monkeypatch, tmp_path):
     dst = str(tmp_path / "new.bin")
     ok, msg = core.update_download({"pojia-ce-linux-x64": "u"}, dst)
     assert ok and "无校验和" in msg
+
+
+def test_download_matches_sha256sum_dot_slash_form(core, monkeypatch, tmp_path):
+    """构建脚本写的是 `sha256sum ./*`，条目形如 `hash  ./文件名`。"""
+    blob = b"real-binary"
+    table = ("%s  ./pojia-ce-linux-x64\n"
+             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ./SHA256SUMS.txt\n"
+             % hashlib.sha256(blob).hexdigest())
+    monkeypatch.setattr(core, "_http_get", lambda url, timeout=8: table.encode() if url == "s" else blob)
+    monkeypatch.setattr(core, "update_asset", lambda: "pojia-ce-linux-x64")
+    dst = str(tmp_path / "new.bin")
+    ok, msg = core.update_download({"pojia-ce-linux-x64": "u", "SHA256SUMS.txt": "s"}, dst)
+    assert ok, msg
+    assert "无校验和" not in msg          # 命中就是命中，不能悄悄退化成不校验
+
+
+def test_download_refuses_when_table_lacks_entry(core, monkeypatch, tmp_path):
+    """表能读到但没有这一行 —— 发布不全，不装。"""
+    monkeypatch.setattr(core, "_http_get", lambda url, timeout=8:
+                        b"deadbeef  ./other-file\n" if url == "s" else b"blob")
+    monkeypatch.setattr(core, "update_asset", lambda: "pojia-ce-linux-x64")
+    dst = str(tmp_path / "new.bin")
+    ok, msg = core.update_download({"pojia-ce-linux-x64": "u", "SHA256SUMS.txt": "s"}, dst)
+    assert not ok and "没有" in msg and not os.path.exists(dst)
 
 
 def test_run_update_says_uptodate(core, monkeypatch, capsys):

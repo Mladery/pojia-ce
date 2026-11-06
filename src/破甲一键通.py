@@ -16492,18 +16492,24 @@ def update_download(assets, dst):
         return False, "下载失败：%s" % e
     want = ""
     sums = assets.get("SHA256SUMS.txt")
+    want, have_table = "", False
     if sums:
         try:
             for line in _http_get(sums, timeout=20).decode("utf-8", "replace").splitlines():
                 parts = line.split()
-                if len(parts) == 2 and parts[1].lstrip("*") == name:
+                # 构建脚本是 `sha256sum ./*`，条目写的是 `hash  ./文件名`；只比
+                # 文件名的话会一条都对不上，然后静默跳过校验 —— 那等于没校验。
+                if len(parts) == 2 and os.path.basename(parts[1].lstrip("*")) == name:
                     want = parts[0].lower()
                     break
+            have_table = True
         except Exception:
             want = ""
     got = hashlib.sha256(blob).hexdigest()
     if want and got != want:
         return False, "校验不符（发布方 %s…，本地 %s…）" % (want[:12], got[:12])
+    if have_table and not want:
+        return False, "校验和表里没有 %s，不装" % name
     try:
         tmp = dst + ".part"
         with open(tmp, "wb") as f:
