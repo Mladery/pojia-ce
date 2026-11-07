@@ -218,3 +218,66 @@ def test_hint_survives_network_error(core, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(core, "_http_get", boom)
     core.update_hint(None)
     assert "错误" not in capsys.readouterr().out
+
+
+# ---- POSIX 安装态：install.json 是唯一的判据 -------------------------------
+
+def _fake_install(core, monkeypatch, tmp_path, prefix=""):
+    """把 HERE 指到临时目录，并按需写一份 install.json。"""
+    monkeypatch.setattr(core, "HERE", str(tmp_path))
+    if prefix is not None:
+        (tmp_path / "install.json").write_text(
+            json.dumps({"prefix": prefix or str(tmp_path), "version": "8.65"},
+                       ensure_ascii=False), encoding="utf-8")
+
+
+def test_install_meta_reads_own_prefix(core, monkeypatch, tmp_path):
+    _fake_install(core, monkeypatch, tmp_path)
+    assert core.install_meta().get("version") == "8.65"
+
+
+def test_install_meta_ignores_copied_dir(core, monkeypatch, tmp_path):
+    """装好的目录被整个复制走，副本里 prefix 对不上 —— 那份按绿色版处理。
+
+    不然升级会往副本目录里铺一整套，用户以为在升原件。
+    """
+    _fake_install(core, monkeypatch, tmp_path, prefix="/somewhere/else/pojia-ce")
+    assert core.install_meta() == {}
+
+
+def test_installed_mode_posix_uses_meta(core, monkeypatch, tmp_path):
+    monkeypatch.setattr(core.os, "name", "posix")
+    _fake_install(core, monkeypatch, tmp_path)
+    assert core.installed_mode() is True
+    (tmp_path / "install.json").unlink()
+    assert core.installed_mode() is False
+
+
+def test_asset_prefers_installer_when_installed(core, monkeypatch, tmp_path):
+    """装出来的下安装包，绿色版下裸二进制 —— 拿错的会丢 _internal。"""
+    monkeypatch.setattr(core.os, "name", "posix")
+    monkeypatch.setattr(core, "IS_MAC", False)
+    _fake_install(core, monkeypatch, tmp_path)
+    assert core.update_asset() == "pojia-ce-linux-x64-installer.run"
+    monkeypatch.setattr(core, "IS_MAC", True)
+    monkeypatch.setattr(core.platform, "machine", lambda: "arm64")
+    assert core.update_asset() == "pojia-ce-macos-arm64-installer.command"
+    monkeypatch.setattr(core.platform, "machine", lambda: "x86_64")
+    assert core.update_asset() == "pojia-ce-macos-x64-installer.command"
+
+
+def test_unix_install_schedules_installer(core, monkeypatch, tmp_path):
+    """安装版自更新不能直接 os.replace：新版的 _internal 会有多余的库。"""
+    monkeypatch.setattr(core.os, "name", "posix")
+    monkeypatch.setattr(core.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(core, "SELF", str(tmp_path / "pojia-ce"))
+    _fake_install(core, monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(core.subprocess, "Popen", lambda *a, **k: calls.append(a))
+
+    ok, msg = core.update_install("/tmp/new-installer.run")
+    assert ok and "静默安装" in msg
+    sh = (tmp_path / "_update.sh").read_text(encoding="utf-8")
+    assert "/tmp/new-installer.run" in sh and "--yes" in sh
+    assert "pojia-ce" in sh
+    assert calls, "没把更新脚本拉起来"

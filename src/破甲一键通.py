@@ -230,7 +230,7 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess.Popen = _popen_no_window
     subprocess._dsh_no_window_patched = True
 
-VERSION = "8.64"
+VERSION = "8.65"
 # 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
 # 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
 # "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。
@@ -16099,6 +16099,10 @@ def build_parser():
     p.add_argument("--update", action="store_true", help="检查并安装新版本")
     p.add_argument("--check-update", dest="check_update", action="store_true",
                    help="只检查有没有新版本")
+    p.add_argument("--uninstall", action="store_true",
+                   help="卸载安装版（删程序，默认保留 状态/ 和 历史备份/）")
+    p.add_argument("--purge", action="store_true",
+                   help="配合 --uninstall：连用户数据一起删")
     p.add_argument("--no-update-check", dest="no_update_check", action="store_true",
                    help="启动时不查更新（默认只查一次、只提示，从不自动安装）")
     p.add_argument("--diagnose", action="store_true", help="只读：详细取证")
@@ -16471,17 +16475,42 @@ UPDATE_API = REPO_URL.replace("https://github.com/", "https://api.github.com/rep
 
 # 安装程序写在 HKCU 的登记项。绿色版没有这条。
 INSTALL_KEY = r"Software\Mladery\pojia-ce"
+# POSIX 那边没有注册表，安装器在目录里留一份 install.json。绿色版解压出来
+# 没有这个文件 —— 这是两种形态唯一的区别，也是升级时选哪个资产的依据。
+INSTALL_META = "install.json"
+
+
+def install_meta():
+    """读安装器写的 install.json。不是安装版就返回空 dict。
+
+    prefix 要跟当前目录对得上才算数：把装好的目录整个复制一份出去，那份
+    仍是绿色版（否则升级会往副本目录里铺一整套，用户以为在升原件）。
+    """
+    try:
+        with open(os.path.join(HERE, INSTALL_META), encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    want = str(d.get("prefix") or "")
+    try:
+        if want and os.path.normcase(os.path.abspath(want)) != os.path.normcase(HERE):
+            return {}
+    except Exception:
+        return {}
+    return d
 
 
 def installed_mode():
     """当前进程是不是「装出来的」。
 
-    安装版在 HKCU 留一条 InstallDir，值就是安装目录；裸 exe 走到哪都能跑，没有
-    这条。判定用目录比对而不是 exe 名 —— 有人把装好的 exe 复制到桌面，那份仍该
-    按绿色版处理（否则升级会去下安装包，反而把桌面那份覆盖掉）。
+    Windows 看 HKCU 的 InstallDir；Linux / macOS 看目录里的 install.json。两条
+    都做目录比对而不是文件名 —— 有人把装好的程序复制到桌面，那份仍该按绿色版
+    处理（否则升级会去下安装包，反而把桌面那份覆盖掉）。
     """
     if os.name != "nt":
-        return False
+        return bool(install_meta())
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, INSTALL_KEY) as k:
@@ -16499,18 +16528,18 @@ def installed_mode():
 def update_asset():
     """当前平台该下哪个资产。
 
-    Windows 分两种形态：装出来的下 setup.exe（静默覆盖，顺带刷新卸载项里的版本
-    号），绿色版下裸 exe（换掉自身即可）。两者不能混 —— 拿裸 exe 去覆盖安装目录，
-    控制面板里看到的版本会永远停在旧值。
+    每个平台都分两种形态：装出来的下安装包（静默覆盖，顺带刷新版本登记），
+    绿色版下裸二进制（换掉自身即可）。两者不能混 —— 拿裸二进制去覆盖安装
+    目录，登记里看到的版本会永远停在旧值，而且新的依赖文件一个都不会到位。
     """
     if os.name == "nt":
-        if installed_mode():
-            return "pojia-ce-windows-x64-setup.exe"
-        return "pojia-ce-windows-x64.exe"
+        return ("pojia-ce-windows-x64-setup.exe" if installed_mode()
+                else "pojia-ce-windows-x64.exe")
     if IS_MAC:
-        return ("pojia-ce-macos-arm64" if platform.machine().lower() in ("arm64", "aarch64")
-                else "pojia-ce-macos-x64")
-    return "pojia-ce-linux-x64"
+        arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+        base = "pojia-ce-macos-" + arch
+        return base + ("-installer.command" if installed_mode() else "")
+    return "pojia-ce-linux-x64" + ("-installer.run" if installed_mode() else "")
 
 
 def _ver2(s):
@@ -16580,6 +16609,8 @@ def update_install(new_path):
     if not getattr(sys, "frozen", False):
         return False, "源码运行时只提示不替换，新版留着：%s" % new_path
     if os.name != "nt":
+        if installed_mode():
+            return _install_via_unix(new_path)
         try:
             os.replace(new_path, me)
             return True, "已替换，重新运行就是新版"
@@ -16648,6 +16679,137 @@ def _install_via_setup(setup_path):
         return True, "已安排静默安装，本进程退出后自动升级并重启"
     except Exception as e:
         return False, "安排安装失败：%s" % e
+
+
+def _install_via_unix(installer_path):
+    """安装版的自更新（Linux / macOS）：等本进程退出，跑一遍安装包的静默模式。
+
+    不能像绿色版那样直接 os.replace：安装目录是 onedir 形态，新版可能多出几个
+    .so 或数据文件，只换主程序就会缺依赖。交给安装器铺一遍，它顺手把
+    install.json 里的版本改掉。
+
+    等待用 kill -0 轮询而不是 wait —— 发起更新的不是父进程，拿不到子进程句柄；
+    加次数上限是因为 PID 会被系统复用，真被复用了会一直等下去。
+    """
+    sh = os.path.join(HERE, "_update.sh")
+    q = lambda s: '"' + str(s).replace('"', '\\"') + '"'
+    lines = [
+        "#!/bin/sh",
+        "# 由 --update 生成，跑完自己删掉。",
+        "i=0",
+        "while kill -0 %d 2>/dev/null; do" % os.getpid(),
+        "  i=$((i+1))",
+        '  [ "$i" -gt 300 ] && break',
+        "  sleep 1",
+        "done",
+        "/bin/sh %s --yes --quiet || exit 1" % q(installer_path),
+        "exec %s" % q(os.path.join(HERE, os.path.basename(SELF))),
+        "",
+    ]
+    try:
+        with open(sh, "w", encoding="utf-8", errors="replace", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+        os.chmod(sh, 0o755)
+        # start_new_session 让它脱离当前终端：GUI 是从终端拉起来的，用户关掉
+        # 那个窗口不该把升级半路掐死。
+        subprocess.Popen(["/bin/sh", sh], close_fds=True, start_new_session=True)
+        return True, "已安排静默安装，本进程退出后自动升级并重启"
+    except Exception as e:
+        return False, "安排安装失败：%s" % e
+
+
+def _self_argv():
+    """重新拉起自己该用什么命令行。源码态得带解释器。"""
+    if getattr(sys, "frozen", False):
+        return [SELF]
+    return [sys.executable, SELF]
+
+
+def run_uninstall(args):
+    """卸载安装版。返回退出码。
+
+    自己删自己：POSIX 上 unlink 一个正在运行的可执行文件是合法的，进程拿着
+    已经打开的 inode 跑完，磁盘上那份就没了。Windows 删不掉运行中的 exe，
+    那边由安装程序负责，这里只告诉人去哪点。
+    """
+    meta = install_meta()
+    if not meta:
+        say("  这里不是安装目录（没有 %s）。" % INSTALL_META, "y")
+        if os.name == "nt":
+            say("  Windows 请到「设置 → 应用」卸载，或运行安装目录里的 uninstall.exe")
+        else:
+            say("  绿色版直接删掉文件和目录就行，没有需要卸的东西。")
+        return 1
+
+    prefix = os.path.abspath(str(meta.get("prefix") or HERE))
+    say("  卸载 %s" % prefix)
+
+    # 还原必须排在删除前面 —— 顺序反了就没程序可用了。
+    do_revert = bool(getattr(args, "revert", False))
+    if not do_revert and not getattr(args, "yes", False) and not QUIET:
+        say("")
+        do_revert = _confirm("删之前先把已改的提示词还原？")
+    if do_revert:
+        say("  还原中…")
+        try:
+            rc = subprocess.call(_self_argv() + ["--revert", "-y"])
+        except Exception as e:
+            say("  还原起不来：%s" % e, "y")
+            rc = -1
+        if rc == 0:
+            say("  还原完成")
+        elif rc > 0:
+            say("  还原有失败项（退出码 %s），继续卸载" % rc, "y")
+
+    # 只删认得出的程序项。目录里剩下的是 状态/、历史备份/、persona.md、日志
+    # —— 全是用户自己的东西。卸载不是「清空这个目录」的委婉说法。
+    for name in ("pojia-ce", "_internal", INSTALL_META, "_update.sh", "_update.bat"):
+        p = os.path.join(prefix, name)
+        if not os.path.exists(p) and not os.path.islink(p):
+            continue
+        try:
+            if os.path.isdir(p) and not os.path.islink(p):
+                shutil.rmtree(p)
+            else:
+                os.remove(p)
+        except Exception as e:
+            say("  删不掉 %s：%s" % (p, e), "y")
+
+    home = os.path.expanduser("~")
+    link = os.path.join(home, ".local", "bin", "pojia-ce")
+    try:
+        # 只摘自己那条：realpath 落在本安装目录里才删，别把别人的同名软链带走。
+        if os.path.islink(link) and \
+                os.path.realpath(link).startswith(os.path.realpath(prefix) + os.sep):
+            os.remove(link)
+    except Exception:
+        pass
+    desk = os.path.join(home, ".local", "share", "applications", "pojia-ce.desktop")
+    try:
+        if os.path.isfile(desk):
+            os.remove(desk)
+    except Exception:
+        pass
+
+    if getattr(args, "purge", False):
+        try:
+            shutil.rmtree(prefix)
+            say("  已删除整个目录，用户数据一并清掉")
+        except Exception as e:
+            say("  删不掉 %s：%s" % (prefix, e), "y")
+        return 0
+
+    left = sorted(os.listdir(prefix)) if os.path.isdir(prefix) else []
+    if left:
+        say("  程序已删除。用户数据留着：%s" % prefix)
+        say("  （%s。要一起删：--uninstall --purge）" % "、".join(left[:5]))
+    else:
+        try:
+            os.rmdir(prefix)
+        except Exception:
+            pass
+        say("  已卸载干净。")
+    return 0
 
 
 def run_update(check_only=False):
@@ -16763,6 +16925,11 @@ def main():
     if args.restore:
         args.revert = True
     args.full = args.full or False
+
+    if args.uninstall:
+        rc = run_uninstall(args)
+        _pause_needed = bool(getattr(args, "pause", False)) and not QUIET
+        return rc
 
     if args.update or args.check_update:
         rc = run_update(check_only=bool(args.check_update and not args.update))

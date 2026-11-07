@@ -1,6 +1,6 @@
 # 破甲一键通 · 社区版
 
-> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.63-CE`**。
+> 仓库 `Mladery/pojia-ce`，对外版本号 **`v8.65-CE`**。
 > 独立维护的社区版，源自上游最后一版**带源码**的提交（`536ece2`，v8.14）。MIT，**非官方**，与原作者无隶属关系。
 > 仅限在**自己有权管理的本机设备**上使用，下载前请读 [完整免责声明](docs/免责声明.md)。
 
@@ -103,7 +103,7 @@ python src/破甲GUI.py                         # 图形界面（本机网页）
 在客户端**新会话**里单独发一句 `破甲自检`，只回这一行就说明人格真载入了：
 
 ```
-破甲自检成功 | 社区版v8.63 | 仓库地址：https://github.com/Mladery/pojia-ce
+破甲自检成功 | 社区版v8.65 | 仓库地址：https://github.com/Mladery/pojia-ce
 ```
 
 回复带解释、加戏或拒答 → 人格没生效，先确认目标已**重启**（改的是磁盘文件，运行中的进程不会重读）。
@@ -119,24 +119,38 @@ pojia-ce --mac-check --resign   # 顺手签回去
 
 手动救援：`codesign --force --deep --sign - /Applications/Xxx.app` 或 `xattr -cr /Applications/Xxx.app`。另外：客户端要**连托盘一起退干净**再重开，`/Applications` 里的包要求属主是你自己。
 
-### 安装版（Windows 推荐）
+### 安装版（推荐）
 
-下 `pojia-ce-windows-x64-setup.exe` 双击装。装完开始菜单有入口、设置里能卸载、命令行直接敲 `pojia-ce`。
+下对应平台的安装包，双击装。装完有菜单入口、能卸载、命令行直接敲 `pojia-ce`。
 
-- 装在 `%LOCALAPPDATA%\pojia-ce`，**不需要管理员**，也不弹 UAC。
-- 再装一次就是升级：装在原处、不产生第二份，`状态/` 和 `备份/` 都留着。
-- 静默装：`pojia-ce-windows-x64-setup.exe /S`；指定目录：追加 `/D=D:\tools\pojia`（必须放最后，不加引号）。
-- 静默卸载：装目录下的 `uninstall.exe /S`。用户数据不跟着删。
+| 平台 | 安装包 |
+|---|---|
+| Windows x64 | `pojia-ce-windows-x64-setup.exe` |
+| Linux x64 | `pojia-ce-linux-x64-installer.run` |
+| macOS Intel | `pojia-ce-macos-x64-installer.command` |
+| macOS Apple Silicon | `pojia-ce-macos-arm64-installer.command` |
+
+**Windows**：装在 `%LOCALAPPDATA%\pojia-ce`，**不需要管理员**，也不弹 UAC。再装一次就是升级，`状态/` 和 `备份/` 都留着。静默装 `/S`；指定目录 `/D=D:\tools\pojia`（必须放最后，不加引号）；静默卸载 `uninstall.exe /S`。
+
+**Linux / macOS**：装到 `~/.local/share/pojia-ce`，命令行入口软链到 `~/.local/bin/pojia-ce`，**不需要 sudo** —— 装到系统目录的话 `--update` 每次都得提权，自动更新就废了。同一个包再跑一次就是升级，`状态/`、`历史备份/`、`persona.md` 原样保留。
+
+```sh
+sh pojia-ce-linux-x64-installer.run              # 交互：问一遍装哪、加不加 PATH
+pojia-ce --uninstall                             # 删程序，留 状态/ 和 历史备份/
+pojia-ce --uninstall --purge                     # 连用户数据一起删
+pojia-ce --uninstall --revert                    # 删之前先把已改的提示词还原
+```
+
+Linux 上自动往应用菜单里放一项；装的时候问要不要把 `~/.local/bin` 写进 shell 配置（`--yes` 模式下不问，也不碰你的 dotfile）。macOS 的包是 `.command`，双击在终端里跑，第一次可能被 Gatekeeper 拦，右键 → 打开。
 
 ### 免安装
 
-| 平台 | 文件 |
-|---|---|
-| Windows x64（安装包，推荐） | `pojia-ce-windows-x64-setup.exe` |
-| Windows x64（单文件，免安装） | `pojia-ce-windows-x64.exe` |
-| Linux x64 | `pojia-ce-linux-x64` |
-| macOS Intel | `pojia-ce-macos-x64` |
-| macOS Apple Silicon | `pojia-ce-macos-arm64` |
+| 平台 | 安装版（推荐） | 免安装 |
+|---|---|---|
+| Windows x64 | `pojia-ce-windows-x64-setup.exe` | `pojia-ce-windows-x64.exe` |
+| Linux x64 | `pojia-ce-linux-x64-installer.run` | `pojia-ce-linux-x64` |
+| macOS Intel | `pojia-ce-macos-x64-installer.command` | `pojia-ce-macos-x64` |
+| macOS Apple Silicon | `pojia-ce-macos-arm64-installer.command` | `pojia-ce-macos-arm64` |
 
 在 [Actions](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml) 最新一次运行的 Artifacts 里下；tag 版本在 [Releases](https://github.com/Mladery/pojia-ce/releases)。用法和脚本一致，把 `python 破甲一键通.py` 换成可执行文件即可；`persona.md`、`状态/`、日志都跟着可执行文件走（安装版则在装目录里）。
 
@@ -150,6 +164,8 @@ pojia-ce --mac-check --resign   # 顺手签回去
 
 | 版本 | 主题 |
 |---|---|
+| [`v8.65-CE`](CHANGELOG.md#v865-ce-2026-11-07) | Linux / macOS 安装包（装·升级·卸载一个文件） / 自更新认安装态 |
+| [`v8.64-CE`](CHANGELOG.md#v864-ce-2026-11-06) | Windows 安装程序 / 条款页 / 组件默认项 / 桌面快捷方式 |
 | [`v8.63-CE`](CHANGELOG.md#v863-ce-2026-11-06) | 更新检查与一键安装 / bash 换 busybox ash（受限沙箱内可跑） |
 | [`v8.62-CE`](CHANGELOG.md#v862-ce-2026-11-05) | DSH 0.2.2 适配（预算分链 / 预设身份） / 真实桌面路径 / 卸载登记表 |
 | [`v8.61-CE`](CHANGELOG.md#v861-ce-2026-11-04) | Gemini CLI 换成 Antigravity：Gemini 特化段 + 双文件拆分 |
@@ -279,7 +295,7 @@ python 破甲一键通.py --persona-set ""           # 清空，回到 persona.m
 ## 校验
 
 ```
-bce154392decb24dfb2cb959a5899c1d502d0312e764b5ab0698723ae08c6b49  src/破甲一键通.py           (1,195,714 B / LF)
+925b16379347202a1bebe61b8c3bab65c6c9171e59e7ef425305d5f59b082dda  src/破甲一键通.py           (1,202,595 B / LF)
 af92906ad1c147768c1393da7c9a8187ca94cb3767a528707bb795dc97aebb15  src/破甲GUI.py              (52,070 B / LF)
 f470a41ac51116fd12052f8c01eecf2d08c87c26100d3c26472134b7b22a73d0  upstream/破甲一键通.v8.14.py (351,393 B / LF)
 ```

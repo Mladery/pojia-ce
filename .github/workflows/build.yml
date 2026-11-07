@@ -143,6 +143,38 @@ jobs:
           # 漏了 --add-data 只有敲 --gui 那一刻才炸。这一步真起服务、真点一次动作。
           python tools/gui_smoke.py "build/dist/$BIN_NAME${{ matrix.ext }}"
 
+      # macOS 的安装包：再打一份目录形态，套上自解压安装器。复用同一个 runner，
+      # 省掉一次 checkout 和 pip install —— macOS runner 排队本来就慢。
+      - name: 打安装包（macOS）
+        if: startsWith(matrix.asset, 'macos-')
+        shell: bash
+        run: |
+          python tools/build_exe.py --name "$BIN_NAME" --onedir \
+            --dist build/dist-onedir \
+            --work build/work-onedir \
+            --spec build/spec-onedir
+          python tools/build_unix_installer.py \
+            --src "build/dist-onedir/$BIN_NAME" --asset "${{ matrix.asset }}"
+
+      - name: 冒烟：装一遍、跑一次、再卸掉（macOS）
+        if: startsWith(matrix.asset, 'macos-')
+        shell: bash
+        run: |
+          # 装 / 升 / 卸这条链只有真跑一遍才知道通不通。HOME 指到临时目录，
+          # 免得往 runner 的主目录里扔软链和桌面项。
+          set -e
+          D=$(mktemp -d)
+          export HOME="$D"
+          sh "out/$BIN_NAME-${{ matrix.asset }}-installer.command" --yes --quiet --prefix "$D/app"
+          test -x "$D/app/$BIN_NAME" || { echo "装完没有可执行文件"; exit 1; }
+          test -f "$D/app/install.json" || { echo "没写 install.json"; exit 1; }
+          VER=$("$D/app/$BIN_NAME" --version)
+          echo "装好的版本：$VER"
+          case "$VER" in *CE*) ;; *) echo "--version 输出不对：$VER"; exit 1 ;; esac
+          "$D/app/$BIN_NAME" --uninstall --yes --quiet
+          test ! -f "$D/app/$BIN_NAME" || { echo "卸载没删掉程序"; exit 1; }
+          echo "安装 / 卸载冒烟通过"
+
       - name: 改名
         shell: bash
         run: |
@@ -180,8 +212,10 @@ jobs:
             fi
           fi
 
-          # 上传产物
-          gh release upload "$TAG" "out/$BIN_NAME-${{ matrix.asset }}${{ matrix.ext }}" --clobber
+          # 上传产物。用 out/* 而不是具体文件名：macOS 那边一次出两个
+          # （裸二进制 + 安装器），写死名字会漏掉其中一个，而漏掉的恰好是
+          # 安装版用户 --update 要下的那个。
+          gh release upload "$TAG" out/* --clobber
 
           # 最后强制「已发布」。删过 tag 再重推、或者 release 建得比 tag 早的时候，
           # gh 会把它留在**草稿**态 —— 草稿在 Releases 页面公开访问时看不到，用户
@@ -385,13 +419,110 @@ jobs:
           gh release upload "$TAG" out/*.exe --clobber
           gh release edit "$TAG" --draft=false || true
 
+  # Linux 安装包。和 Windows 的 setup 对位：装到 ~/.local/share/pojia-ce，
+  # 免 root，再跑一次就是升级，卸载交给程序自己的 --uninstall。
+  #
+  # 为什么不用 .deb：deb 装到 /usr/lib，--update 每次都得 sudo，自动更新就废了。
+  # 自解压脚本装到用户目录，和 Windows 装 %LOCALAPPDATA% 是同一个理由。
+  linux-installer:
+    name: linux-x64-installer
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装打包工具
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller==${{ env.PYINSTALLER_VERSION }}"
+          python -m pip install "cython==${{ env.CYTHON_VERSION }}" || echo "::warning::Cython 装不上，本次产物走纯源码打包"
+
+      - name: 打包（目录形态）
+        shell: bash
+        run: |
+          python tools/build_exe.py --name "$BIN_NAME" --onedir \
+            --dist build/dist-onedir \
+            --work build/work-onedir \
+            --spec build/spec-onedir
+
+      - name: 生成安装包
+        shell: bash
+        run: |
+          python tools/build_unix_installer.py \
+            --src "build/dist-onedir/$BIN_NAME" --asset linux-x64
+          ls -lh out/
+
+      - name: 冒烟：装一遍、跑一次、再卸掉
+        shell: bash
+        run: |
+          # 一个临时 HOME，把软链、.desktop、安装目录全关在里面。
+          set -e
+          D=$(mktemp -d)
+          export HOME="$D"
+          sh "out/$BIN_NAME-linux-x64-installer.run" --yes --quiet --prefix "$D/app"
+
+          test -x "$D/app/$BIN_NAME" || { echo "装完没有可执行文件"; exit 1; }
+          test -f "$D/app/install.json" || { echo "没写 install.json"; exit 1; }
+          test -L "$D/.local/bin/$BIN_NAME" || { echo "没建命令行软链"; exit 1; }
+          test -f "$D/.local/share/applications/$BIN_NAME.desktop" || { echo "没写桌面项"; exit 1; }
+
+          VER=$("$D/app/$BIN_NAME" --version)
+          echo "装好的版本：$VER"
+          case "$VER" in *CE*) ;; *) echo "--version 输出不对：$VER"; exit 1 ;; esac
+
+          # 升级一次：同一个包再跑一遍必须成功，且不丢数据。留个文件当探针。
+          echo keep > "$D/app/状态/探针.txt"
+          sh "out/$BIN_NAME-linux-x64-installer.run" --yes --quiet --prefix "$D/app"
+          test -f "$D/app/状态/探针.txt" || { echo "升级把用户数据弄丢了"; exit 1; }
+
+          "$D/app/$BIN_NAME" --uninstall --yes --quiet
+          test ! -f "$D/app/$BIN_NAME" || { echo "卸载没删掉程序"; exit 1; }
+          test ! -e "$D/.local/bin/$BIN_NAME" || { echo "卸载没摘软链"; exit 1; }
+          test ! -e "$D/.local/share/applications/$BIN_NAME.desktop" || { echo "卸载没摘桌面项"; exit 1; }
+          test -f "$D/app/状态/探针.txt" || { echo "卸载把用户数据删了（默认该保留）"; exit 1; }
+          echo "安装 / 升级 / 卸载冒烟通过"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-linux-x64-installer
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            NOTES="docs/release-notes/$TAG.md"
+            if [ -f "$NOTES" ]; then
+              gh release create "$TAG" --title "破甲一键通 ${TAG#v}" --notes-file "$NOTES" || true
+            else
+              gh release create "$TAG" --title "破甲一键通 ${TAG#v}" --generate-notes || true
+            fi
+          fi
+          gh release upload "$TAG" out/* --clobber
+          gh release edit "$TAG" --draft=false || true
+
   # 四个平台的产物汇总成一份校验和。Windows 走签名验签，另外三个平台只有
   # SHA-256 这一条路 —— 所以这份文件是它们唯一的完整性凭据。
   checksums:
     name: checksums
     # 安装程序也算发布产物，缺了它这份校验和就不全。
-    needs: [build, windows-setup]
-    if: needs.build.result == 'success' && needs.windows-setup.result == 'success'
+    needs: [build, windows-setup, linux-installer]
+    if: needs.build.result == 'success' && needs.windows-setup.result == 'success' && needs.linux-installer.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 

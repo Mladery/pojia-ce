@@ -2,10 +2,11 @@
 
 破甲一键通 · 社区版（`pojia-ce`）的逐版改动。**README 只留工具说明与索引，实现细节、踩过的坑、验证方式都在这里。**
 
-版本号分两段：`VERSION`（机器值，写进护照和标记块）+ `EDITION`（只拼到对外显示上，`VER_TAG = "8.64-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。带 tag 的版本在 [Releases](https://github.com/Mladery/pojia-ce/releases) 里，发布说明在 [docs/release-notes/](docs/release-notes/)。
+版本号分两段：`VERSION`（机器值，写进护照和标记块）+ `EDITION`（只拼到对外显示上，`VER_TAG = "8.65-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。带 tag 的版本在 [Releases](https://github.com/Mladery/pojia-ce/releases) 里，发布说明在 [docs/release-notes/](docs/release-notes/)。
 
 | 版本 | 日期 | 主题 |
 |---|---|---|
+| [`v8.65-CE`](#v865-ce-2026-11-07) | 2026-11-07 | Linux / macOS 安装包：装·升级·卸载一个文件 / 自更新认安装态（`install.json`） / `--uninstall` |
 | [`v8.64-CE`](#v864-ce-2026-11-07) | 2026-11-07 | Windows 安装包（免管理员、再装即升级） / 卸载保留用户数据 / 安装态自更新改走 setup |
 | [`v8.63-CE`](#v863-ce-2026-11-06) | 2026-11-06 | 更新检查与一键安装（从不静默更新） / bash 工具换 busybox ash（受限沙箱内可跑） / 告诉模型这是 ash 不是 bash |
 | [`v8.62-CE`](#v862-ce-2026-11-05) | 2026-11-05 | DSH 0.2.2 适配（预算分链 / 预设身份） / 真实桌面路径 / 两个新定位来源 / 命令行入口修复 |
@@ -27,6 +28,95 @@
 | [`v8.0-CE`](#v80-ce-2026-10-29) | 2026-10-29 | 起点：摘掉加密封条，转社区独立维护 |
 
 ---
+
+## v8.65-CE (2026-11-07)
+
+Windows 有 setup 了，Linux 和 macOS 还是两个裸二进制躺在 Release 里 —— 下载页上
+一个 exe、一个没扩展名的文件，谁也不知道哪个能双击。这一版把另外两个平台补齐，
+形态和 Windows 对齐：**装、升级、卸载，一个文件**。
+
+### 为什么不做 .deb / .pkg
+
+两种都是系统级安装，落到 `/usr/lib` 或 `/Applications`。那样 `--update` 每跑一次
+都得提权 —— 用户得在终端里敲 sudo，或者在弹窗里输密码。自动更新到这里就废了，
+而这恰好是 v8.63 刚做好的东西。
+
+所以装到用户目录：`~/.local/share/pojia-ce`，命令行入口软链到 `~/.local/bin`。
+免 sudo、免 UAC，和 Windows 装 `%LOCALAPPDATA%` 是同一个理由。
+
+代价是 `~/.local/bin` 默认不在 PATH 里。安装时问一句要不要写进 shell 配置，
+`--yes` 模式（自升级走这条）不问也不碰。
+
+### 形态：一段 sh + 一份 tar.gz
+
+`tools/installer.sh` 是头，`tools/build_unix_installer.py` 把 onedir 产物压成
+tar.gz 贴在后面，中间一行 `__POJIA_PAYLOAD_BELOW__` 当分隔。装的时候 `awk` 找出
+这一行，`tail -n +N` 把后面的字节切出来解包。
+
+三个平台共用一个模板，只有扩展名不同：Linux 是 `.run`，macOS 是 `.command`
+（双击能在终端里跑）。
+
+载荷用 tarfile 手工构造 TarInfo，不走 `tar.add()`：后者会把构建机的 uid / 用户名
+写进去，解出来看着像别人的文件。这里统一 0:0 + root，mtime 也钉成 0。
+
+### 装 / 升 / 卸
+
+```
+sh pojia-ce-linux-x64-installer.run          交互
+sh ... --yes --quiet --prefix DIR            非交互（自更新走这条）
+pojia-ce --uninstall                         删程序，留数据
+pojia-ce --uninstall --revert                删之前先还原
+pojia-ce --uninstall --purge                 连数据一起删
+```
+
+升级就是再跑一遍同一个包：解到临时目录 → 新目录里没有的旧文件逐个搬过去 →
+旧目录整个换掉。数据是「新目录里没有的都搬过去」，不是白名单列举 —— 列举写死的
+话，以后加个新目录就丢数据。
+
+卸载交给程序自己（`--uninstall`）：POSIX 上 unlink 一个正在运行的可执行文件是
+合法的，进程拿着已经打开的 inode 跑完，磁盘上那份就没了。Windows 删不掉运行中的
+exe，那边只能由安装程序负责。
+
+### 自更新要认得出「装出来的」
+
+Windows 靠 `HKCU\Software\Mladery\pojia-ce\InstallDir`。POSIX 没有注册表，安装器
+在目录里写一份 `install.json`（prefix / version / asset / 安装时间），
+`installed_mode()` 读它，并且要求 `prefix` 和当前目录对得上 —— 装好的目录被整个
+复制走，那份仍是绿色版，否则升级会往副本里铺一整套。
+
+认出来之后 `update_asset()` 才会去下 `*-installer.run` 而不是裸二进制。拿错的后
+果不是「版本没变」，是新版多出来的 `.so` 一个都没到位。
+
+安装态的自更新不能像绿色版那样 `os.replace`：换成 `_update.sh`，用 `kill -0`
+轮询等本进程退出（加 300 次上限，PID 会被复用），再 `sh 安装包 --yes --quiet`，
+最后把程序拉起来。`start_new_session=True` 让它脱离终端 —— GUI 是从终端拉起来的，
+用户关掉那个窗口不该把升级半截掐死。
+
+### 三个坑
+
+**`split(MARK)` 从 awk 那行切开了。** 模板里 `awk '/^__POJIA_PAYLOAD_BELOW__$/ ...'`
+也写着这个字符串，`head.split(MARK)[0]` 一刀切在 awk 行上，剩下的头部连引号都不
+闭合，`sh -n` 直接报 `unexpected EOF while looking for matching '`。改成 `rfind`。
+
+**tar 里混进了反斜杠。** `os.path.join` 在 Windows 上给 `pojia-ce\pojia-ce`，
+Linux 上解出来就是个名字里带反斜杠的文件。tar 的路径分隔符永远是 `/`，自己拼。
+
+**卸载保留数据，结果装不回去了。** 原来的保护是「目录非空且没有 install.json
+就拒绝」—— 卸载一次留下 `状态/`，之后每次重装都被自己拦。改成白名单：只有认得
+的数据项才允许合并，认不出的（别人的文件）照样拒绝，因为下面紧接着是 `rm -rf`。
+
+### 验证
+
+```
+Windows   270 passed, 4 skipped（4 条是 POSIX 专用）
+WSL       272 passed, 2 skipped（没装 node，两条语法检查跳过）
+```
+
+WSL 里用真产物跑了一遍全链路：装 → `--version` 出 8.64-CE → 造数据 → 再装一次
+（数据都在）→ 卸载（程序没了，数据留着，软链和 `.desktop` 都摘了）→ 重装。
+
+CI 加了 `linux-x64-installer` job，macOS 两个架构在原有 matrix 里多打一份，两条
+都带「装一遍、跑一次、再卸掉」的冒烟。
 
 ## v8.64-CE (2026-11-07)
 
@@ -103,7 +193,7 @@ WorkBuddy 等目标执行 `--revert`。静默卸载（`/S`）不弹窗，默认�
 
 便携场景还得有：U 盘带走、不想装、临时用一次。Release 里两个都发，安装包标推荐。
 
-
+## v8.63-CE (2026-11-06)
 
 两件事：自己会更新了；DSH 的 `bash` 工具不再要求「完全访问」才肯跑。
 
