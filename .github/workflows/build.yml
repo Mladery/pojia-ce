@@ -195,14 +195,21 @@ jobs:
             gh release edit "$TAG" --notes-file "$NOTES"
           fi
 
-  # 目录形态的 Windows 产物。单文件版每次启动都要把自身解包到 %TEMP% 下的
-  # _MEIxxxxxx 再运行；有些机器的安全软件不放行在临时目录里创建可执行文件，
-  # 启动即报 "Could not create temporary directory!"。目录版把依赖放在 exe
-  # 旁边的 _internal/，启动时直接加载，一步都不碰临时目录。
-  windows-onedir:
-    name: windows-x64-onedir
+  # Windows 安装程序。目录形态的产物 + NSIS = 一个 setup.exe。
+  #
+  # 为什么发安装程序：散着发 exe 和 zip，用户得先猜哪个能用。setup 装完就有
+  # 开始菜单项、卸载项和 PATH，双击也能直接跑。
+  #
+  # 为什么底子是目录形态：单文件版每次启动都要把自身解包到 %TEMP%\_MEIxxxxxx
+  # 再运行，有些机器的安全软件不放行在临时目录里创建可执行文件，启动即报
+  # "Could not create temporary directory!"。安装版把 _internal/ 放在 exe 旁边，
+  # 一步都不碰临时目录。
+  #
+  # 单文件 exe 仍然发（便携场景），只是 Release 里标成备选。
+  windows-setup:
+    name: windows-x64-setup
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     env:
       PYTHONUTF8: "1"
@@ -220,6 +227,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "pyinstaller==${{ env.PYINSTALLER_VERSION }}"
           python -m pip install "cython==${{ env.CYTHON_VERSION }}" || echo "::warning::Cython 装不上，本次产物走纯源码打包"
+          # makensis。choco 装的会进 Program Files (x86)\NSIS，tools/build_installer.py
+          # 自己找得到，不用加 PATH。
+          choco install nsis -y --no-progress
 
       - name: 打包（目录形态）
         shell: bash
@@ -255,20 +265,105 @@ jobs:
         shell: bash
         run: python tools/gui_smoke.py "build/dist-onedir/pojia-ce/pojia-ce.exe"
 
-      - name: 压成 zip
+      - name: 签名（内层 exe，配了证书才签）
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          PFX_PW: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          # 没配证书就跳过 —— 产物照样能用，只是属性页显示「未知发布者」。
+          if (-not $env:PFX_B64) {
+            Write-Host "::notice::没有配置 WINDOWS_SIGNING_PFX_BASE64，跳过签名"
+            exit 0
+          }
+          $dir = Join-Path $env:RUNNER_TEMP "signing"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $pfx = Join-Path $dir "pojia-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+          [IO.File]::WriteAllText(
+            (Join-Path $dir "pojia-signing-密码.txt"),
+            $env:PFX_PW,
+            (New-Object System.Text.UTF8Encoding($false)))
+
+          & .\tools\sign-windows.ps1 -Exe "build/dist-onedir/pojia-ce/pojia-ce.exe" -Pfx $pfx
+          if ($LASTEXITCODE -ne 0) { throw "签名失败（sign-windows.ps1 退出码 $LASTEXITCODE）" }
+          Remove-Item -Recurse -Force $dir
+          Write-Host "内层 exe 签名 OK"
+
+      - name: 生成安装程序
+        shell: bash
+        run: |
+          python tools/build_installer.py --src build/dist-onedir/pojia-ce \
+            --out "out/$BIN_NAME-windows-x64-setup.exe"
+
+      - name: 签名（安装程序）
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          PFX_PW: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          if (-not $env:PFX_B64) {
+            Write-Host "::notice::没有配置证书，跳过 setup 签名"
+            exit 0
+          }
+          $dir = Join-Path $env:RUNNER_TEMP "signing2"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $pfx = Join-Path $dir "pojia-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+          [IO.File]::WriteAllText(
+            (Join-Path $dir "pojia-signing-密码.txt"),
+            $env:PFX_PW,
+            (New-Object System.Text.UTF8Encoding($false)))
+
+          & .\tools\sign-windows.ps1 -Exe "out/pojia-ce-windows-x64-setup.exe" -Pfx $pfx
+          if ($LASTEXITCODE -ne 0) { throw "setup 签名失败" }
+          & .\tools\verify-windows.ps1 -Exe "out/pojia-ce-windows-x64-setup.exe"
+          if ($LASTEXITCODE -ne 0) { throw "验签不通过：签名者与仓库钉定的证书不一致" }
+          Remove-Item -Recurse -Force $dir
+          Write-Host "setup 签名 OK"
+
+      - name: 冒烟：静默装一遍、跑一次、再卸掉
         shell: pwsh
         run: |
-          # 整目录压成一个包：解压即用，_internal/ 和 exe 必须保持同级。
-          $src = "build/dist-onedir/pojia-ce"
-          $zip = "out/${{ env.BIN_NAME }}-windows-x64-onedir.zip"
-          New-Item -ItemType Directory -Force -Path out | Out-Null
-          Compress-Archive -Path "$src/*" -DestinationPath $zip -CompressionLevel Optimal
-          Get-Item $zip | Format-List Name,Length
+          # 这一步才是真的验安装包。--version 只能说明里面那个 exe 是好的，
+          # 装不上、装完起不来、卸载删不干净，都得到这儿才暴露。
+          $tmp = Join-Path $env:RUNNER_TEMP "pojia-install"
+          if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+
+          # /D= 必须是最后一个参数，且不能加引号；静默安装不看任何页面。
+          $p = Start-Process -FilePath "out\pojia-ce-windows-x64-setup.exe" `
+                             -ArgumentList "/S", "/D=$tmp" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "静默安装失败，退出码 $($p.ExitCode)" }
+
+          if (-not (Test-Path "$tmp\pojia-ce.exe")) { throw "装完没有 exe" }
+          if (-not (Test-Path "$tmp\_internal")) { throw "装完没有 _internal/" }
+          if (-not (Test-Path "$tmp\uninstall.exe")) { throw "装完没有卸载程序" }
+
+          # 控制台子系统的 exe，pwsh 会等它退出；用 -join 拼回一行再判，避免
+          # 多行输出被当成数组比较。
+          $ver = (& "$tmp\pojia-ce.exe" --version 2>&1) -join " "
+          Write-Host "装好的版本：$ver"
+          if ($LASTEXITCODE -ne 0) { throw "--version 失败" }
+          if ($ver -notmatch "CE") { throw "--version 输出不对：$ver" }
+
+          # 安装态判定：程序靠这条决定升级时下 setup 还是裸 exe。
+          $key = "HKCU:\Software\Mladery\pojia-ce"
+          $dir = (Get-ItemProperty -Path $key -Name InstallDir).InstallDir
+          if ($dir -ne $tmp) { throw "注册表 InstallDir 不对：$dir" }
+
+          $un = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\pojia-ce"
+          if (-not (Test-Path $un)) { throw "没有卸载登记项" }
+
+          & "$tmp\uninstall.exe" /S
+          Start-Sleep -Seconds 3
+          if (Test-Path "$tmp\pojia-ce.exe") { throw "卸载没删掉 exe" }
+          if (Test-Path $un) { throw "卸载没清注册表" }
+          Write-Host "安装 / 卸载冒烟通过"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.BIN_NAME }}-windows-x64-onedir
-          path: out/*.zip
+          name: ${{ env.BIN_NAME }}-windows-x64-setup
+          path: out/*.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -287,16 +382,16 @@ jobs:
               gh release create "$TAG" --title "破甲一键通 ${TAG#v}" --generate-notes || true
             fi
           fi
-          gh release upload "$TAG" out/*.zip --clobber
+          gh release upload "$TAG" out/*.exe --clobber
           gh release edit "$TAG" --draft=false || true
 
   # 四个平台的产物汇总成一份校验和。Windows 走签名验签，另外三个平台只有
   # SHA-256 这一条路 —— 所以这份文件是它们唯一的完整性凭据。
   checksums:
     name: checksums
-    # 目录版也算发布产物，缺了它这份校验和就不全。
-    needs: [build, windows-onedir]
-    if: needs.build.result == 'success' && needs.windows-onedir.result == 'success'
+    # 安装程序也算发布产物，缺了它这份校验和就不全。
+    needs: [build, windows-setup]
+    if: needs.build.result == 'success' && needs.windows-setup.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 

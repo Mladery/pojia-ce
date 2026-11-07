@@ -119,18 +119,30 @@ pojia-ce --mac-check --resign   # 顺手签回去
 
 手动救援：`codesign --force --deep --sign - /Applications/Xxx.app` 或 `xattr -cr /Applications/Xxx.app`。另外：客户端要**连托盘一起退干净**再重开，`/Applications` 里的包要求属主是你自己。
 
-### 免安装
+### 安装版（Windows 推荐）
 
-CI 每次推 `main` 都打一遍，打 tag 时自动发 Release：
+下 `pojia-ce-windows-x64-setup.exe` 双击装。装完开始菜单有入口、设置里能卸载、命令行直接敲 `pojia-ce`。
+
+- 装在 `%LOCALAPPDATA%\pojia-ce`，**不需要管理员**，也不弹 UAC。
+- 再装一次就是升级：装在原处、不产生第二份，`状态/` 和 `备份/` 都留着。
+- 静默装：`pojia-ce-windows-x64-setup.exe /S`；指定目录：追加 `/D=D:\tools\pojia`（必须放最后，不加引号）。
+- 静默卸载：装目录下的 `uninstall.exe /S`。用户数据不跟着删。
+
+### 免安装
 
 | 平台 | 文件 |
 |---|---|
-| Windows x64 | `pojia-ce-windows-x64.exe` |
+| Windows x64（安装包，推荐） | `pojia-ce-windows-x64-setup.exe` |
+| Windows x64（单文件，免安装） | `pojia-ce-windows-x64.exe` |
 | Linux x64 | `pojia-ce-linux-x64` |
 | macOS Intel | `pojia-ce-macos-x64` |
 | macOS Apple Silicon | `pojia-ce-macos-arm64` |
 
-在 [Actions](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml) 最新一次运行的 Artifacts 里下；tag 版本在 [Releases](https://github.com/Mladery/pojia-ce/releases)。用法和脚本一致，把 `python 破甲一键通.py` 换成可执行文件即可；`persona.md`、`状态/`、日志都跟着可执行文件走。三点先说：macOS 首次要 `xattr -d com.apple.quarantine`；Windows Defender 可能对单文件 exe 误报（要绝对干净就用源码跑）；不带参数双击就进图形界面，想看命令行菜单加 `--menu`。
+在 [Actions](https://github.com/Mladery/pojia-ce/actions/workflows/build.yml) 最新一次运行的 Artifacts 里下；tag 版本在 [Releases](https://github.com/Mladery/pojia-ce/releases)。用法和脚本一致，把 `python 破甲一键通.py` 换成可执行文件即可；`persona.md`、`状态/`、日志都跟着可执行文件走（安装版则在装目录里）。
+
+三点先说：macOS 首次要 `xattr -d com.apple.quarantine`；Windows Defender 可能对单文件 exe 误报（要绝对干净就用源码跑，或用安装版——它不在临时目录里解包，误报少得多）；不带参数双击就进图形界面，想看命令行菜单加 `--menu`。
+
+单文件 exe 每次启动会把自己解包到 `%TEMP%\_MEIxxxxxx`，个别机器的安全软件不放行在临时目录里创建可执行文件，会报 `Could not create temporary directory!`。遇到这个就换安装版。
 
 ## 本仓库的改动
 

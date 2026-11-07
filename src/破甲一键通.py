@@ -16469,10 +16469,43 @@ def run_persona(args):
 # 环境变量 POJIA_NO_UPDATE_CHECK=1。
 UPDATE_API = REPO_URL.replace("https://github.com/", "https://api.github.com/repos/") + "/releases/latest"
 
+# 安装程序写在 HKCU 的登记项。绿色版没有这条。
+INSTALL_KEY = r"Software\Mladery\pojia-ce"
+
+
+def installed_mode():
+    """当前进程是不是「装出来的」。
+
+    安装版在 HKCU 留一条 InstallDir，值就是安装目录；裸 exe 走到哪都能跑，没有
+    这条。判定用目录比对而不是 exe 名 —— 有人把装好的 exe 复制到桌面，那份仍该
+    按绿色版处理（否则升级会去下安装包，反而把桌面那份覆盖掉）。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, INSTALL_KEY) as k:
+            d = str(winreg.QueryValueEx(k, "InstallDir")[0] or "")
+    except Exception:
+        return False
+    if not d:
+        return False
+    try:
+        return os.path.normcase(os.path.abspath(d)) == os.path.normcase(HERE)
+    except Exception:
+        return False
+
 
 def update_asset():
-    """当前平台该下哪个资产。"""
+    """当前平台该下哪个资产。
+
+    Windows 分两种形态：装出来的下 setup.exe（静默覆盖，顺带刷新卸载项里的版本
+    号），绿色版下裸 exe（换掉自身即可）。两者不能混 —— 拿裸 exe 去覆盖安装目录，
+    控制面板里看到的版本会永远停在旧值。
+    """
     if os.name == "nt":
+        if installed_mode():
+            return "pojia-ce-windows-x64-setup.exe"
         return "pojia-ce-windows-x64.exe"
     if IS_MAC:
         return ("pojia-ce-macos-arm64" if platform.machine().lower() in ("arm64", "aarch64")
@@ -16552,6 +16585,8 @@ def update_install(new_path):
             return True, "已替换，重新运行就是新版"
         except Exception as e:
             return False, "替换失败：%s" % e
+    if installed_mode():
+        return _install_via_setup(new_path)
     bat = os.path.join(HERE, "_update.bat")
     lines = [
         "@echo off",
@@ -16578,6 +16613,41 @@ def update_install(new_path):
         return True, "已安排替换，本进程退出后自动换装并重启"
     except Exception as e:
         return False, "安排替换失败：%s" % e
+
+
+def _install_via_setup(setup_path):
+    """安装版的自更新：等本进程退出，静默跑一遍 setup，再把程序拉起来。
+
+    不能像绿色版那样直接 move 覆盖：onedir 的 `_internal\\*.dll` 在进程活着时
+    是被锁住的，硬覆盖必然失败。用进程名轮询等它真退（按实际文件名等，用户改过
+    名也认得），再让安装程序铺回原目录 —— 安装程序从注册表读 InstallDir，装完
+    顺带把卸载项里的 DisplayVersion 刷新成新版本。
+    """
+    bat = os.path.join(HERE, "_update.bat")
+    exe_name = os.path.basename(os.path.abspath(SELF))
+    lines = [
+        "@echo off",
+        "ping -n 4 127.0.0.1 >nul",
+        ":wait",
+        'tasklist /fi "imagename eq %s" 2>nul | find /i "%s" >nul' % (exe_name, exe_name),
+        "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)",
+        'start /wait "" "%s" /S' % setup_path,
+        'start "" "%s"' % os.path.join(HERE, exe_name),
+        'del "%~f0"',
+    ]
+    try:
+        try:
+            codecs.lookup("mbcs")
+            enc = "mbcs"
+        except LookupError:
+            enc = "utf-8"
+        with open(bat, "w", encoding=enc, errors="replace", newline="") as f:
+            f.write("\r\n".join(lines) + "\r\n")
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(["cmd", "/c", bat], close_fds=True, creationflags=flags)
+        return True, "已安排静默安装，本进程退出后自动升级并重启"
+    except Exception as e:
+        return False, "安排安装失败：%s" % e
 
 
 def run_update(check_only=False):
