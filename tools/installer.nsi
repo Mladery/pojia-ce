@@ -155,6 +155,9 @@ Section "主程序（必需）" SecMain
   WriteRegDWORD HKCU "${UNINST_KEY}" "EstimatedSize" "$0"
 SectionEnd
 
+; 默认勾选按「第一次装电脑的人会不会用」来排：桌面图标看得见，双击就开；
+; PATH 是给命令行用户准备的，让不明就里的人勾上，只会往环境变量里塞一条
+; 他看不懂、也不知道怎么删的路径。开始菜单保持勾选 —— 那是卸载入口的常规位置。
 Section "开始菜单项" SecMenu
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortCut  "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_EXE}" 0
@@ -162,11 +165,11 @@ Section "开始菜单项" SecMenu
   CreateShortCut  "$SMPROGRAMS\${APP_NAME}\卸载 ${APP_NAME}.lnk" "$INSTDIR\uninstall.exe"
 SectionEnd
 
-Section /o "桌面快捷方式" SecDesktop
+Section "桌面快捷方式" SecDesktop
   CreateShortCut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_EXE}" 0
 SectionEnd
 
-Section "加入 PATH" SecPath
+Section /o "加入 PATH" SecPath
   ; 只动 HKCU\Environment，不碰系统 PATH。已经在了就不重复追加。
   ReadRegStr $0 HKCU "Environment" "PATH"
   ${StrStr} $1 "$0" "$INSTDIR"
