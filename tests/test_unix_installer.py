@@ -141,12 +141,27 @@ def test_refuses_foreign_dir(tool, src, tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX 安装器")
-def test_sh_printf_keeps_utf8_bytes():
-    """macOS 的 /bin/sh 是 bash 3.2，先钉住它不会把多字节字符吃掉。"""
-    s = "拒绝把「测试」当安装目录"
-    r = subprocess.run(["sh", "-c", 'printf "%s\\n" "$1"', "sh", s],
+def test_braced_var_before_cjk_is_intact():
+    """macOS 的 /bin/sh 是 bash 3.2：`$VAR` 后面紧贴中文时，它会把那个字的
+    首字节吃进变量名（变量变成 VAR<0xE3>），取值落空、剩下的字节还不是合法
+    UTF-8。所以脚本里变量后面跟中文一律写 ${VAR}。这里钉住这个写法。"""
+    r = subprocess.run(["sh", "-c", 'P=/tmp/x; printf "%s\\n" "A「${P}」B"'],
                        capture_output=True)
-    assert r.stdout.decode("utf-8") == s + "\n", r.stdout.hex()
+    assert r.stdout.decode("utf-8") == "A「/tmp/x」B\n", r.stdout.hex()
+
+
+def test_no_bare_var_before_cjk():
+    """静态守一遍：模板里不许出现 `$VAR` 紧跟非 ASCII。"""
+    import re
+    pat = re.compile(r"\$[A-Za-z0-9_]+[^\x00-\x7f]")
+    bad = []
+    with open(os.path.join(ROOT, "tools", "installer.sh"), encoding="utf-8") as f:
+        for i, line in enumerate(f, 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if pat.search(line):
+                bad.append("%d: %s" % (i, line.strip()))
+    assert not bad, "变量后面紧跟中文要写 ${VAR}：\n" + "\n".join(bad)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX 安装器")

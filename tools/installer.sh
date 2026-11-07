@@ -26,6 +26,9 @@ REVERT=-1          # -1 没问过，0 不还原，1 还原
 WANT_PATH=-1       # -1 没问过，0 不加，1 加
 PURGE=0
 
+# 变量后面紧跟中文时必须写 ${VAR}：macOS 的 /bin/sh 是 bash 3.2，它在 UTF-8 里
+# 扫变量名会多吃掉后面那个字的首字节，`$PREFIX」` 被当成变量 `PREFIX<0xE3>`，
+# 未定义 → 整个值变空，剩下的字节还会解码失败。v8.65 的 macOS CI 就是这么炸的。
 say() { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
@@ -60,14 +63,14 @@ while [ $# -gt 0 ]; do
     --add-path)   WANT_PATH=1 ;;
     --no-path)    WANT_PATH=0 ;;
     --help|-h)    usage; exit 0 ;;
-    *)            die "看不懂的参数：$1（--help 看用法）" ;;
+    *)            die "看不懂的参数：${1}（--help 看用法）" ;;
   esac
   shift
 done
 
 # 绝对路径 + 不能是 / 或 $HOME。下面要 rm -rf 这个值，手滑一次就是灾难。
 case "$PREFIX" in
-  ""|"/"|"$HOME"|"$HOME/") die "拒绝把「$PREFIX」当安装目录" ;;
+  ""|"/"|"$HOME"|"$HOME/") die "拒绝把「${PREFIX}」当安装目录" ;;
   /*) ;;
   *)  die "安装目录要给绝对路径：$PREFIX" ;;
 esac
@@ -113,7 +116,7 @@ LINE=$(awk '/^__POJIA_PAYLOAD_BELOW__$/ {print NR + 1; exit}' "$SELF_PATH" 2>/de
 tail -n +"$LINE" "$SELF_PATH" > "$TMP/payload.tgz" || die "拆不开载荷"
 tar -xzf "$TMP/payload.tgz" -C "$TMP" || die "解包失败"
 SRC="$TMP/$APP"
-[ -f "$SRC/$APP" ] || die "载荷里没有 $APP，包坏了"
+[ -f "$SRC/$APP" ] || die "载荷里没有 ${APP}，包坏了"
 chmod +x "$SRC/$APP" 2>/dev/null
 [ -d "$SRC/_internal" ] || say "  注意：载荷里没有 _internal/，只有单文件程序"
 
@@ -143,10 +146,10 @@ fi
 
 if [ -n "$OLD_VER" ] && [ "$OLD_VER" != "$VERSION" ]; then
   say "$APP_NAME $OLD_VER → $VERSION"
-  say "  目录 $PREFIX（状态/、历史备份/ 会保留）"
+  say "  目录 ${PREFIX}（状态/、历史备份/ 会保留）"
 elif [ -n "$OLD_VER" ]; then
   say "重新安装 $APP_NAME $VERSION"
-  say "  目录 $PREFIX（数据保留，程序文件重写一遍）"
+  say "  目录 ${PREFIX}（数据保留，程序文件重写一遍）"
 else
   say "安装 $APP_NAME $VERSION"
   say "  目录 $PREFIX"
@@ -231,7 +234,7 @@ if [ "$WANT_PATH" = 1 ]; then
       printf '\n# pojia-ce PATH\n'
       printf 'case ":$PATH:" in *":%s:"*) ;; *) export PATH="%s:$PATH" ;; esac\n' \
              "$BIN_DIR" "$BIN_DIR"
-    } >> "$RC" 2>/dev/null && say "  已写进 $RC（重开终端生效）"
+    } >> "$RC" 2>/dev/null && say "  已写进 ${RC}（重开终端生效）"
   fi
 fi
 
@@ -240,7 +243,7 @@ say "装好了。"
 if [ "$PATH_OK" = 0 ] && [ "$WANT_PATH" != 1 ]; then
   say "  $BIN_DIR 不在 PATH 里，现在这么用："
   say "      $PREFIX/$APP"
-  say "  想直接敲 $APP："
+  say "  想直接敲 ${APP}："
   say "      echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.profile"
 fi
 say "  卸载：$PREFIX/$APP --uninstall"
