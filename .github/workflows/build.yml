@@ -149,6 +149,7 @@ jobs:
         if: startsWith(matrix.asset, 'macos-')
         shell: bash
         run: |
+          mkdir -p build/dist-onedir build/work-onedir build/spec-onedir
           python tools/build_exe.py --name "$BIN_NAME" --onedir \
             --dist build/dist-onedir \
             --work build/work-onedir \
@@ -449,6 +450,7 @@ jobs:
       - name: 打包（目录形态）
         shell: bash
         run: |
+          mkdir -p build/dist-onedir build/work-onedir build/spec-onedir
           python tools/build_exe.py --name "$BIN_NAME" --onedir \
             --dist build/dist-onedir \
             --work build/work-onedir \
