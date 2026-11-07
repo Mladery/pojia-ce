@@ -79,10 +79,33 @@ Var DoRevert
 !define MUI_FINISHPAGE_LINK "项目主页"
 !define MUI_FINISHPAGE_LINK_LOCATION "${APP_URL}"
 
+; 组件页默认是「左边一窄条列表、右边一块描述」，四条选项在窄条里会被截成
+; 「加入 PATH（命令行直接…」。改成列表占满整行、描述挪到下面一行，宽度就够
+; 了。代价是描述只剩一条，所以下面每条描述都压到一句话。
+!define MUI_COMPONENTSPAGE_SMALLDESC
+
 ; MUI2 自己占着 .onGUIInit，改标题要走它的钩子。
 !define MUI_CUSTOMFUNCTION_GUIINIT PojiaGuiInit
 
 !insertmacro MUI_PAGE_WELCOME
+
+; 协议页。正文是 docs/免责声明.md 转成的纯文本，由 build_installer.py 生成后
+; 用 /DLICENSE= 传进来 —— 条款只有那一份源文件，改 md 就等于改安装包里的协议。
+;
+; 必须勾了才能往下走：复选框是这一步的全部意义，不加等于只是给人看了一眼。
+;
+; 上下那两句提示都压到一行。MUI 给它们留的是固定高度，写长了会折行、把协议框
+; 挤小 —— 这里每多一行，正文就少一行。
+!define MUI_LICENSEPAGE_CHECKBOX
+!define MUI_LICENSEPAGE_CHECKBOX_TEXT "我已阅读并同意上述免责声明"
+!define MUI_LICENSEPAGE_TEXT_TOP "不同意就点「取消」。"
+!define MUI_LICENSEPAGE_TEXT_BOTTOM "勾选后才能继续。"
+!define MUI_LICENSEPAGE_BUTTON "同意并继续"
+!define MUI_PAGE_HEADER_TEXT "许可协议"
+!define MUI_PAGE_HEADER_SUBTEXT "读一遍再决定"
+!define MUI_PAGE_CUSTOMFUNCTION_PRE LicensePagePre
+!insertmacro MUI_PAGE_LICENSE "${LICENSE}"
+
 !insertmacro MUI_PAGE_COMPONENTS
 
 ; 升级时不让人再选目录：装到别处就是两份，PATH 和卸载项各指一处。
@@ -143,7 +166,7 @@ Section /o "桌面快捷方式" SecDesktop
   CreateShortCut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_EXE}" 0
 SectionEnd
 
-Section "加入 PATH（命令行直接敲 ${APP_ID}）" SecPath
+Section "加入 PATH" SecPath
   ; 只动 HKCU\Environment，不碰系统 PATH。已经在了就不重复追加。
   ReadRegStr $0 HKCU "Environment" "PATH"
   ${StrStr} $1 "$0" "$INSTDIR"
@@ -159,10 +182,10 @@ Section "加入 PATH（命令行直接敲 ${APP_ID}）" SecPath
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecMain}    "程序本体，约 40 MB。"
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecMenu}    "在开始菜单里建一个文件夹，含启动和卸载两项。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecMain}    "程序本体。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecMenu}    "开始菜单里放启动和卸载两项。"
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "在桌面放一个快捷方式。"
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecPath}    "把安装目录写进当前用户的 PATH，之后在任意终端可直接敲 ${APP_ID}。"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecPath}    "写进当前用户 PATH，之后在任意终端直接敲 ${APP_ID}。"
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Function .onInit
@@ -186,6 +209,14 @@ Function .onInit
     Abort
   ${EndIf}
   done:
+FunctionEnd
+
+Function LicensePagePre
+  ; 升级不重放协议。条款没变，用户早就同意过；每次更新都逼一遍，只会让人
+  ; 养成闭眼点「下一步」的习惯 —— 那反而让协议变得没有意义。
+  ${If} $IsUpgrade == 1
+    Abort
+  ${EndIf}
 FunctionEnd
 
 Function DirPagePre

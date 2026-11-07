@@ -53,6 +53,59 @@ def core_version():
     return m.group(1) if m else "0.0"
 
 
+LICENSE_MD = os.path.join(ROOT, "docs", "免责声明.md")
+
+
+def md_to_text(md):
+    """把免责声明.md 压成安装向导能显示的纯文本。
+
+    NSIS 的协议页只吃纯文本（要用 RTF 得自己转，不值得）。Markdown 的记号
+    直接显示出来会很怪 —— `**`、`>`、`|---|` 混在条款里像乱码。这里只做
+    「去掉记号、保留文字」，不重排：段落靠空行分，长行交给编辑框自己折。
+
+    表格压成一条一行、用空格隔开，比留一竖排 `|` 好读。
+    """
+    out = []
+    for raw in md.splitlines():
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            continue
+        if re.match(r"^\s*\|[\s:|-]+\|\s*$", line):
+            continue                                  # |---|---| 分隔行
+        if line.strip().startswith("|"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            out.append("   ".join(c for c in cells if c))
+            continue
+        line = re.sub(r"^#{1,6}\s*", "", line)        # 标题记号
+        line = re.sub(r"^>\s?", "", line)             # 引用记号
+        line = re.sub(r"^\s*[-*+]\s+", "  · ", line)  # 无序列表
+        line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)  # 粗体
+        line = re.sub(r"`([^`]+)`", r"\1", line)      # 行内代码
+        line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", line)   # 链接只留文字
+        if re.match(r"^\s*-{3,}\s*$", line):
+            line = "—" * 24
+        out.append(line)
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+    return text.strip() + "\n"
+
+
+def write_license():
+    """生成 build/LICENSE.txt，返回路径；源文件不在就返回空串。
+
+    编码必须是带 BOM 的 UTF-8：NSIS 靠 BOM 判断编码，不带 BOM 的中文在协议页
+    里会变成一堆问号。
+    """
+    if not os.path.isfile(LICENSE_MD):
+        return ""
+    with open(LICENSE_MD, encoding="utf-8") as f:
+        text = md_to_text(f.read())
+    path = os.path.join(ROOT, "build", "LICENSE.txt")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8-sig", newline="\r\n") as f:
+        f.write(text)
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=os.path.join("build", "dist-onedir", "pojia-ce"),
@@ -79,8 +132,14 @@ def main():
     out = os.path.abspath(a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
+    # 安装包没有协议页就不该出包：条款是发布物的一部分，不是可选项。
+    lic = write_license()
+    if not lic:
+        print("没有 docs/免责声明.md，装出来就没有协议页 —— 先把它补回来。", file=sys.stderr)
+        return 1
+
     # /D 的值不能加引号（makensis 会连引号一起当值），所以路径里有空格就过不去。
-    for label, val in (("SRCDIR", src), ("OUTFILE", out)):
+    for label, val in (("SRCDIR", src), ("OUTFILE", out), ("LICENSE", lic)):
         if " " in val:
             print("%s 里有空格，makensis 的 /D 吃不下：%s" % (label, val), file=sys.stderr)
             return 1
@@ -89,6 +148,7 @@ def main():
            "/DVERSION=%s" % ver,
            "/DSRCDIR=%s" % src,
            "/DOUTFILE=%s" % out,
+           "/DLICENSE=%s" % lic,
            NSI]
     print("+ %s" % " ".join(cmd))
     r = subprocess.run(cmd)
