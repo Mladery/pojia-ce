@@ -230,7 +230,7 @@ if IS_WIN and not getattr(subprocess, "_dsh_no_window_patched", False):
     subprocess.Popen = _popen_no_window
     subprocess._dsh_no_window_patched = True
 
-VERSION = "8.63"
+VERSION = "8.64"
 # 社区版（Community Edition）。只影响**显示**，不参与护照 / 标记块的比对 ——
 # 护照里存的是纯数字版本号，把 "-CE" 写进去会让所有已打的靶点一夜之间变成
 # "旧版"，用户看到一片假警报。对外展示统一走 VER_TAG。

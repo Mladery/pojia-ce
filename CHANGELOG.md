@@ -2,10 +2,11 @@
 
 破甲一键通 · 社区版（`pojia-ce`）的逐版改动。**README 只留工具说明与索引，实现细节、踩过的坑、验证方式都在这里。**
 
-版本号分两段：`VERSION`（机器值，写进护照和标记块）+ `EDITION`（只拼到对外显示上，`VER_TAG = "8.63-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。带 tag 的版本在 [Releases](https://github.com/Mladery/pojia-ce/releases) 里，发布说明在 [docs/release-notes/](docs/release-notes/)。
+版本号分两段：`VERSION`（机器值，写进护照和标记块）+ `EDITION`（只拼到对外显示上，`VER_TAG = "8.64-CE"`）。把 `-CE` 塞进护照会让所有已打的靶点一夜之间变成「旧版」，全是假警报。带 tag 的版本在 [Releases](https://github.com/Mladery/pojia-ce/releases) 里，发布说明在 [docs/release-notes/](docs/release-notes/)。
 
 | 版本 | 日期 | 主题 |
 |---|---|---|
+| [`v8.64-CE`](#v864-ce-2026-11-07) | 2026-11-07 | Windows 安装包（免管理员、再装即升级） / 卸载保留用户数据 / 安装态自更新改走 setup |
 | [`v8.63-CE`](#v863-ce-2026-11-06) | 2026-11-06 | 更新检查与一键安装（从不静默更新） / bash 工具换 busybox ash（受限沙箱内可跑） / 告诉模型这是 ash 不是 bash |
 | [`v8.62-CE`](#v862-ce-2026-11-05) | 2026-11-05 | DSH 0.2.2 适配（预算分链 / 预设身份） / 真实桌面路径 / 两个新定位来源 / 命令行入口修复 |
 | [`v8.61-CE`](#v861-ce-2026-11-04) | 2026-11-04 | Gemini CLI 换成 Antigravity / Gemini 特化段 / 24 KB 拆分双文件 |
@@ -27,7 +28,82 @@
 
 ---
 
-## v8.63-CE (2026-11-06)
+## v8.64-CE (2026-11-07)
+
+Windows 有了正经安装包。起因是一个启动失败：单文件 exe 每次运行都要把十几 MB
+解包到 `%TEMP%\_MEIxxxxxx`，有些机器的安全软件不放行在临时目录里创建可执行
+文件，双击就报 `Could not create temporary directory!` —— 程序还没开始跑就死在
+解包这一步。
+
+### 安装包
+
+`pojia-ce-windows-x64-setup.exe`，NSIS 打的，装到 `%LOCALAPPDATA%\pojia-ce`。
+
+不用管理员、不弹 UAC。选 `%LOCALAPPDATA%` 而不是 `Program Files`，就是为了让
+「双击装完就能用」这件事成立 —— 要求提权等于把一半人挡在 UAC 弹窗外面。
+
+依赖放在 exe 旁边的 `_internal/`，启动直接加载，**一步都不碰临时目录**。上面那个
+报错从根上消失。
+
+装完三样东西：开始菜单项、设置里的卸载项、PATH 里的 `pojia-ce`。所以命令行里
+直接敲 `pojia-ce --status` 就行，不用 `cd` 到装目录。
+
+### 再装一次就是升级
+
+安装程序启动先读 `HKCU\Software\Mladery\pojia-ce\InstallDir`：
+
+- 有值 → 走升级。目录页**不显示**（装到别处就成两份了，PATH 和卸载项各指一处），
+  窗口标题变成「更新 破甲一键通：8.63 → 8.64」，装完刷新卸载项里的版本号。
+- 没值 → 走全新安装，默认目录 `%LOCALAPPDATA%\pojia-ce`。
+
+`状态/`、`备份/` 不在安装清单里，升级和卸载都不动 —— 那是用户自己的快照和
+还原点，删了没法赔。
+
+### 程序自己认得「装出来的」形态
+
+升级资产按形态分：
+
+| 形态 | 判定 | 下什么 |
+|---|---|---|
+| 安装版 | `InstallDir` 与自身所在目录一致 | `...-setup.exe`，静默覆盖 |
+| 绿色版 | 其余情况 | 裸 `...-windows-x64.exe`，换掉自身 |
+
+判定用**目录比对**而不是 exe 名 —— 有人把装好的 exe 复制到桌面，那份仍按绿色版
+处理，否则升级会去下安装包，反而把桌面那份覆盖掉。
+
+安装版不能像绿色版那样直接 `move` 覆盖：onedir 的 `_internal\*.dll` 在进程活着
+时被锁住，硬覆盖必然失败。改成写一个 `_update.bat`，按进程名轮询等自己真退出，
+再 `/S` 跑一遍 setup，最后把程序拉起来。
+
+### 卸载
+
+`uninstall.exe`，或设置 → 应用 → 破甲一键通。
+
+非静默卸载会问一句「要不要先把改过的文件还原回去」——选「是」就对 DSH /
+WorkBuddy 等目标执行 `--revert`。静默卸载（`/S`）不弹窗，默认不还原：安静的
+卸载不该顺手改别人的软件。
+
+删文件前先验目录结构（`pojia-ce.exe` 和 `uninstall.exe` 都在才动手），注册表
+被改坏时不至于一个手滑删掉别人的目录。
+
+### 踩到的坑
+
+- **NSIS 源文件必须带 UTF-8 BOM**。不带就报 `Bad text encoding`，而且报在第 1 行，
+  看起来像是文件坏了。
+- **`VIProductVersion` 必须四段** `X.X.X.X`。`8.64.0` 三段直接 abort。
+- **`MUI_PAGE_CUSTOMFUNCTION_PRE` 只作用于紧挨着的那个页面宏**。我原来把它写在
+  `MUI_PAGE_WELCOME` 前面，本意是给 `MUI_PAGE_DIRECTORY` 用 —— 结果绑到了欢迎页，
+  升级时目录页照旧弹出来。改成贴着 `DIRECTORY` 放。
+- **`MUI2` 自己占着 `.onGUIInit`**，自定义标题得走 `MUI_CUSTOMFUNCTION_GUIINIT` 钩子。
+- **Git Bash 会把 `/S` 改写成 `S:\`**。本地验证卸载时被这个坑了一轮：卸载器收到
+  无效参数直接退出 0，什么都不干，看起来像「卸载脚本有 bug」。测 Windows 命令行
+  参数要加 `MSYS_NO_PATHCONV=1`。
+
+### 仍然保留单文件 exe
+
+便携场景还得有：U 盘带走、不想装、临时用一次。Release 里两个都发，安装包标推荐。
+
+
 
 两件事：自己会更新了；DSH 的 `bash` 工具不再要求「完全访问」才肯跑。
 
