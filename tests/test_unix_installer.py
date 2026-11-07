@@ -141,16 +141,28 @@ def test_refuses_foreign_dir(tool, src, tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX 安装器")
+def test_sh_printf_keeps_utf8_bytes():
+    """macOS 的 /bin/sh 是 bash 3.2，先钉住它不会把多字节字符吃掉。"""
+    s = "拒绝把「测试」当安装目录"
+    r = subprocess.run(["sh", "-c", 'printf "%s\\n" "$1"', "sh", s],
+                       capture_output=True)
+    assert r.stdout.decode("utf-8") == s + "\n", r.stdout.hex()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 安装器")
 def test_refuses_home_as_prefix(tool, src, tmp_path):
     out = str(tmp_path / "x.run")
     tool.build(src, "linux-x64", out)
     home = tmp_path / "home"
     home.mkdir()
     r = subprocess.run(["sh", out, "--yes", "--quiet", "--prefix", str(home)],
-                       capture_output=True, text=True,
-                       env=dict(os.environ, HOME=str(home)))
+                       capture_output=True, env=dict(os.environ, HOME=str(home)))
     assert r.returncode != 0
-    assert "拒绝" in r.stderr
+    try:
+        err = r.stderr.decode("utf-8")
+    except UnicodeDecodeError as e:
+        pytest.fail("stderr 不是合法 UTF-8：%s（%s）" % (r.stderr.hex(), e))
+    assert "拒绝" in err
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX 安装器")
