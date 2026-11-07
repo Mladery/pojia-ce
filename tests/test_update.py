@@ -245,6 +245,28 @@ def test_install_meta_ignores_copied_dir(core, monkeypatch, tmp_path):
     assert core.install_meta() == {}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="软链前缀是 POSIX 特有的坑")
+def test_install_meta_follows_symlinked_prefix(core, monkeypatch, tmp_path):
+    """macOS 上 mktemp 给的是 /var/...，而 /var 是 /private/var 的软链。
+
+    安装器按 /var/... 写 install.json，进程按 /private/var/... 算出 HERE，
+    abspath 比出来不相等 —— 卸载会静默返回 1，升级还会去下裸二进制。
+    判据得走 realpath。
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("这个环境建不了软链")
+    (real / "install.json").write_text(
+        json.dumps({"prefix": str(link), "version": "8.65"}, ensure_ascii=False),
+        encoding="utf-8")
+    monkeypatch.setattr(core, "HERE", str(real))
+    assert core.install_meta().get("version") == "8.65"
+
+
 def test_installed_mode_posix_uses_meta(core, monkeypatch, tmp_path):
     monkeypatch.setattr(core.os, "name", "posix")
     _fake_install(core, monkeypatch, tmp_path)

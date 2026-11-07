@@ -118,6 +118,27 @@ WSL 里用真产物跑了一遍全链路：装 → `--version` 出 8.64-CE → �
 CI 加了 `linux-x64-installer` job，macOS 两个架构在原有 matrix 里多打一份，两条
 都带「装一遍、跑一次、再卸掉」的冒烟。
 
+### 补丁：第一次跑 CI 才露头的两个 bug
+
+打包脚本本机全通，推上去才红 —— 两处都是「Linux 上行、macOS 上不行」。
+
+**`$PREFIX」` 在 macOS 上把变量名多算了一个字节。** macOS 的 `/bin/sh` 是 bash 3.2，
+扫变量名时会把紧跟其后的那个汉字的首字节吃进去：`$PREFIX」` 被当成变量
+`PREFIX<0xE3>`，未定义 → 取值落空，剩下的 `80 8D` 还不是合法 UTF-8，测试在
+`decode` 阶段就炸了，报 `can't decode byte 0x80 in position 12`。改成 `${PREFIX}`
+显式定界，`$1（`、`$APP，`、`$RC（` 一起改；另加一条静态测试，模板里不许再出现
+`$VAR` 紧跟非 ASCII。
+
+**`/var` 是 `/private/var` 的软链。** 冒烟脚本用 `mktemp -d` 建临时目录，macOS 给的是
+`/var/folders/...`；安装器照这个路径写 `install.json`，而程序跑起来按
+`/private/var/...` 算出 `HERE`。`install_meta()` 原来用 `abspath` 比，两个字符串
+不等 → 「我自己是不是安装版」判成否：`--uninstall` 静默返回 1，`--update` 还会去下
+裸二进制。判据改走 `realpath`（Windows 的 8.3 短名 / junction 同理），并补了一条
+「软链前缀也算同一个目录」的测试。
+
+顺带修掉 Linux 冒烟的探针写入：`$D/app/状态/` 目录不存在，`echo keep >` 直接失败，
+补 `mkdir -p`。
+
 ## v8.64-CE (2026-11-07)
 
 Windows 有了正经安装包。起因是一个启动失败：单文件 exe 每次运行都要把十几 MB

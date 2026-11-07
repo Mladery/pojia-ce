@@ -16480,6 +16480,21 @@ INSTALL_KEY = r"Software\Mladery\pojia-ce"
 INSTALL_META = "install.json"
 
 
+def _same_dir(a, b):
+    """两个路径是不是同一个目录。
+
+    必须过 realpath，不能只 abspath：macOS 的 /var 是指向 /private/var 的软链，
+    安装器按 `/var/folders/.../app` 写 install.json，进程按 `/private/var/.../app`
+    算出 HERE —— abspath 比出来不等，于是「我自己是不是安装版」判成否，卸载
+    静默返回 1、升级去下裸二进制。Windows 的 8.3 短名 / junction 同理。
+    """
+    try:
+        return os.path.normcase(os.path.realpath(a)) == \
+            os.path.normcase(os.path.realpath(b))
+    except Exception:
+        return False
+
+
 def install_meta():
     """读安装器写的 install.json。不是安装版就返回空 dict。
 
@@ -16494,10 +16509,7 @@ def install_meta():
     if not isinstance(d, dict):
         return {}
     want = str(d.get("prefix") or "")
-    try:
-        if want and os.path.normcase(os.path.abspath(want)) != os.path.normcase(HERE):
-            return {}
-    except Exception:
+    if want and not _same_dir(want, HERE):
         return {}
     return d
 
@@ -16519,10 +16531,7 @@ def installed_mode():
         return False
     if not d:
         return False
-    try:
-        return os.path.normcase(os.path.abspath(d)) == os.path.normcase(HERE)
-    except Exception:
-        return False
+    return _same_dir(d, HERE)
 
 
 def update_asset():

@@ -482,6 +482,7 @@ jobs:
           case "$VER" in *CE*) ;; *) echo "--version 输出不对：$VER"; exit 1 ;; esac
 
           # 升级一次：同一个包再跑一遍必须成功，且不丢数据。留个文件当探针。
+          mkdir -p "$D/app/状态"
           echo keep > "$D/app/状态/探针.txt"
           sh "out/$BIN_NAME-linux-x64-installer.run" --yes --quiet --prefix "$D/app"
           test -f "$D/app/状态/探针.txt" || { echo "升级把用户数据弄丢了"; exit 1; }
